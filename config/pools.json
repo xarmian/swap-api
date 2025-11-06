@@ -1,0 +1,22 @@
+{
+  "pools": [
+    {
+      "poolId": 395553,
+      "name": "USDC/VOI (ARC200)",
+      "tokens": {
+        "underlyingToWrapped": {
+          "0": 390001,
+          "302190": 395614
+        },
+        "wrappedPair": {
+          "tokA": 390001,
+          "tokB": 395614
+        },
+        "unwrap": [390001]
+      },
+      "slippageDefault": 0.01
+    }
+  ]
+}
+
+

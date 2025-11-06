@@ -1,0 +1,25 @@
+{
+  "name": "swap-api",
+  "version": "1.0.0",
+  "description": "Swap API for generating quotes and transactions using ulujs on Voi Network",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node index.js",
+    "test": "node test-quote.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "algosdk": "^2.11.0",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
+    "express": "^5.1.0",
+    "ulujs": "^0.12.16"
+  },
+  "devDependencies": {
+    "axios": "^1.13.2"
+  }
+}
