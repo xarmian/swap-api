@@ -1,8 +1,17 @@
-const express = require('express');
-const cors = require('cors');
-const { swap200, CONTRACT, swap } = require('ulujs');
-const algosdk = require('algosdk');
-require('dotenv').config();
+import express from 'express';
+import cors from 'cors';
+import { swap200, CONTRACT, swap } from 'ulujs';
+import algosdk from 'algosdk';
+import dotenv from 'dotenv';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+dotenv.config();
+
+// Get __dirname equivalent in ESM
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -24,8 +33,6 @@ const indexerClient = new algosdk.Indexer(
 );
 
 // --- Config loading (local pools/tokens) ---
-const fs = require('fs');
-const path = require('path');
 
 let poolsConfig = null;
 let tokensConfig = null;
@@ -329,7 +336,8 @@ app.get('/health', (req, res) => {
 
 // Start server only when running directly (local development)
 // When imported as a module (Vercel), export the app instead
-if (require.main === module) {
+// In ESM, check if we're not in a serverless environment
+if (!process.env.VERCEL) {
   app.listen(PORT, () => {
     console.log(`Swap API server running on port ${PORT}`);
     console.log(`Algod: ${process.env.ALGOD_URL || 'https://mainnet-api.voi.nodely.dev'}`);
@@ -338,4 +346,4 @@ if (require.main === module) {
 }
 
 // Export app for Vercel serverless function
-module.exports = app;
+export default app;
