@@ -31,7 +31,6 @@ Environment variables:
 - `PORT` - API server port (default: 3000)
 - `ALGOD_URL` - Algorand node URL (default: https://mainnet-api.voi.nodely.dev)
 - `INDEXER_URL` - Algorand indexer URL (default: https://mainnet-idx.voi.nodely.dev)
-- `DEFAULT_POOL_ID` - Default pool contract ID (optional)
 
 ### Local Config
 
@@ -207,7 +206,7 @@ await algosdk.waitForConfirmation(algodClient, txId, 4);
 
 ## Pool Discovery
 
-Currently, the pool ID must be provided in the request or set as DEFAULT_POOL_ID in the environment. You can view configured pools via `GET /config/pools`.
+The pool ID must be provided in the request body. You can view configured pools via `GET /config/pools`.
 
 ## Error Handling
 

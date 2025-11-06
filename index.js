@@ -127,21 +127,16 @@ app.post('/quote', async (req, res) => {
     } = req.body;
 
     // Validate request
-    if (!address || inputToken === undefined || outputToken === undefined || !amount) {
+    if (!address || inputToken === undefined || outputToken === undefined || !amount || !poolId) {
       return res.status(400).json({
-        error: 'Missing required fields: address, inputToken, outputToken, amount'
+        error: 'Missing required fields: address, inputToken, outputToken, amount, poolId'
       });
     }
 
     // Default slippage tolerance to 1% if not provided
     const slippage = slippageTolerance || 0.01;
 
-    const poolContractId = poolId || process.env.DEFAULT_POOL_ID;
-    if (!poolContractId) {
-      return res.status(400).json({
-        error: 'Pool ID must be provided or DEFAULT_POOL_ID must be set in environment'
-      });
-    }
+    const poolContractId = poolId;
 
     // Load pool config and map underlying to wrapped
     const poolCfg = getPoolConfigById(poolContractId);
@@ -332,9 +327,15 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
 });
 
-// Start server
-app.listen(PORT, () => {
-  console.log(`Swap API server running on port ${PORT}`);
-  console.log(`Algod: ${process.env.ALGOD_URL || 'https://mainnet-api.voi.nodely.dev'}`);
-  console.log(`Indexer: ${process.env.INDEXER_URL || 'https://mainnet-idx.voi.nodely.dev'}`);
-});
+// Start server only when running directly (local development)
+// When imported as a module (Vercel), export the app instead
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`Swap API server running on port ${PORT}`);
+    console.log(`Algod: ${process.env.ALGOD_URL || 'https://mainnet-api.voi.nodely.dev'}`);
+    console.log(`Indexer: ${process.env.INDEXER_URL || 'https://mainnet-idx.voi.nodely.dev'}`);
+  });
+}
+
+// Export app for Vercel serverless function
+module.exports = app;
