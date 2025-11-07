@@ -106,17 +106,58 @@ function calculateOutputAmount(inputAmount, inputReserve, outputReserve, fee) {
   return numerator / denominator;
 }
 
+/**
+ * Calculates price impact for an AMM swap using the standard formula.
+ * 
+ * Price impact measures how much the pool's spot price changes due to a trade.
+ * This uses the standard AMM approach: comparing spot prices before and after the trade.
+ * 
+ * Formula:
+ * - Spot price before: outputReserve / inputReserve
+ * - Spot price after: (outputReserve - outputAmount) / (inputReserve + inputAmount)
+ * - Price impact: |(priceAfter - priceBefore) / priceBefore|
+ * 
+ * This is more accurate than comparing effective price vs spot price, as it directly
+ * measures the change in the pool's price state.
+ * 
+ * @param {BigInt|string|number} inputAmount - Amount of input token being swapped
+ * @param {BigInt|string|number} inputReserve - Current reserve of input token in pool
+ * @param {BigInt|string|number} outputAmount - Amount of output token received (after fees)
+ * @param {BigInt|string|number} outputReserve - Current reserve of output token in pool
+ * @returns {number} Price impact as a decimal (e.g., 0.01 = 1% impact)
+ */
 function calculatePriceImpact(inputAmount, inputReserve, outputAmount, outputReserve) {
-  // Calculate spot price before trade
-  const spotPriceBefore = Number(outputReserve) / Number(inputReserve);
+  // Convert BigInt values to Numbers for calculation
+  const inputAmountNum = Number(inputAmount);
+  const inputReserveNum = Number(inputReserve);
+  const outputAmountNum = Number(outputAmount);
+  const outputReserveNum = Number(outputReserve);
 
-  // Calculate effective price of this trade
-  const effectivePrice = Number(outputAmount) / Number(inputAmount);
+  // Validate inputs to prevent division by zero and invalid calculations
+  if (inputReserveNum <= 0 || inputAmountNum <= 0 || outputAmountNum <= 0 || outputReserveNum <= 0) {
+    return 0; // Return 0 impact for invalid inputs
+  }
 
-  // Price impact = (spotPrice - effectivePrice) / spotPrice
-  const priceImpact = (spotPriceBefore - effectivePrice) / spotPriceBefore;
+  // Calculate spot price before trade: outputReserve / inputReserve
+  const spotPriceBefore = outputReserveNum / inputReserveNum;
 
-  return Math.abs(priceImpact);
+  // Calculate spot price after trade: (outputReserve - outputAmount) / (inputReserve + inputAmount)
+  // This represents the new pool price after the trade executes
+  const newOutputReserve = outputReserveNum - outputAmountNum;
+  const newInputReserve = inputReserveNum + inputAmountNum;
+
+  // Validate post-trade reserves
+  if (newOutputReserve <= 0 || newInputReserve <= 0) {
+    return 0; // Return 0 impact if reserves would be invalid
+  }
+
+  const spotPriceAfter = newOutputReserve / newInputReserve;
+
+  // Price impact = |(priceAfter - priceBefore) / priceBefore|
+  // This measures the percentage change in the pool's spot price due to the trade
+  const priceImpact = Math.abs((spotPriceAfter - spotPriceBefore) / spotPriceBefore);
+
+  return priceImpact;
 }
 
 // No external token lookup; use local config
@@ -242,9 +283,17 @@ app.post('/quote', async (req, res) => {
     );
 
     if (!swapResult || !swapResult.success) {
-      return res.status(500).json({
-        error: 'Failed to generate swap transactions',
-        details: swapResult
+      return res.status(200).json({
+        quote: {
+          inputAmount: amount.toString(),
+          outputAmount: outputAmount.toString(),
+          minimumOutputAmount: minimumOutputAmount.toString(),
+          rate: rate,
+          priceImpact: priceImpact
+        },
+        unsignedTransactions: [],
+        poolId: poolContractId.toString(),
+        error: 'Failed to generate swap transactions' + (swapResult?.error ? `: ${JSON.stringify(swapResult.error)}` : '')
       });
     }
 

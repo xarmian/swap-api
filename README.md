@@ -173,7 +173,11 @@ Health check endpoint.
 1. The API receives a swap request with input/output tokens and amount
 2. It fetches pool information from the swap200 contract using ulujs
 3. Calculates the output amount using the AMM constant product formula: `(reserveOut * amountIn * (10000 - fee)) / (reserveIn * 10000 + amountIn * (10000 - fee))`
-4. Calculates price impact based on spot price vs. effective price
+4. Calculates price impact by comparing spot prices before and after the trade:
+   - Spot price before: `outputReserve / inputReserve`
+   - Spot price after: `(outputReserve - outputAmount) / (inputReserve + inputAmount)`
+   - Price impact: `|(priceAfter - priceBefore) / priceBefore|`
+   - This measures the percentage change in the pool's spot price due to the trade, which is the standard AMM definition of price impact
 5. Uses the local config to resolve ASA↔ARC200 mappings
 6. Generates unsigned transactions using the ulujs swap method in simulation mode (includes wrap → swap → unwrap in one group when required)
 7. Returns the quote and unsigned transactions for the user to sign and submit
