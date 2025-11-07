@@ -3,7 +3,7 @@
     {
       "poolId": 395553,
       "dex": "humbleswap",
-      "name": "USDC/VOI (ARC200)",
+      "name": "USDC/VOI",
       "tokens": {
         "underlyingToWrapped": {
           "0": 390001,
@@ -18,9 +18,25 @@
       "slippageDefault": 0.01
     },
     {
+        "poolId": 429999,
+        "dex": "humbleswap",
+        "name": "UNIT/VOI",
+        "tokens": {
+            "underlyingToWrapped": {
+                "0": 390001
+            },
+            "wrappedPair": {
+                "tokA": 420069,
+                "tokB": 390001
+            },
+            "unwrap": [390001]
+        },
+        "slippageDefault": 0.01
+    },
+    {
       "poolId": 411756,
       "dex": "nomadex",
-      "name": "USDC/VOI",
+      "name": "VOI/USDC",
       "tokens": {
         "tokA": {
           "id": 0,
@@ -32,6 +48,22 @@
         }
       },
       "slippageDefault": 0.01
+    },
+    {
+        "poolId": 429995,
+        "dex": "nomadex",
+        "name": "VOI/UNIT",
+        "tokens": {
+            "tokA": {
+                "id": 0,
+                "type": "native"
+            },
+            "tokB": {
+                "id": 420069,
+                "type": "ARC200"
+            }
+        },
+        "slippageDefault": 0.01
     }
   ]
 }

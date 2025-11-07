@@ -12,6 +12,14 @@ import {
   buildSwapTransactions as buildNomadexSwapTransactions,
   getTokenTypeFromConfig
 } from './lib/nomadex.js';
+import {
+  getPoolInfo as getHumbleswapPoolInfo,
+  getPoolInfo200 as getHumbleswapPoolInfo200,
+  calculateOutputAmount as calculateHumbleswapOutput,
+  buildSwapTransactions as buildHumbleswapSwapTransactions,
+  resolveWrappedTokens,
+  validateWrappedPair
+} from './lib/humbleswap.js';
 
 dotenv.config();
 
@@ -111,28 +119,25 @@ function findMatchingPools(inputToken, outputToken, dexFilter) {
     if (poolDex === 'humbleswap') {
       // For HumbleSwap, check underlyingToWrapped mappings
       const u2w = pool.tokens?.underlyingToWrapped || {};
+      const wrappedPair = pool.tokens?.wrappedPair || {};
+      const tokA = Number(wrappedPair.tokA);
+      const tokB = Number(wrappedPair.tokB);
       
       // Try both string and number keys (JSON may have either)
-      const inputWrapped = u2w[inputTokenStr] ?? u2w[inputTokenNum];
-      const outputWrapped = u2w[outputTokenStr] ?? u2w[outputTokenNum];
+      // If token is not in underlyingToWrapped, it's already wrapped (e.g., ARC200 tokens)
+      const inputWrapped = u2w[inputTokenStr] ?? u2w[inputTokenNum] ?? inputTokenNum;
+      const outputWrapped = u2w[outputTokenStr] ?? u2w[outputTokenNum] ?? outputTokenNum;
       
-      if (inputWrapped !== undefined && outputWrapped !== undefined) {
-        // Check if wrapped pair matches pool's wrappedPair
-        const wrappedPair = pool.tokens?.wrappedPair || {};
-        const tokA = Number(wrappedPair.tokA);
-        const tokB = Number(wrappedPair.tokB);
-        
-        const inputWrappedNum = Number(inputWrapped);
-        const outputWrappedNum = Number(outputWrapped);
-        
-        // Check if the wrapped tokens form a valid pair in this pool
-        const matchesPair =
-          (inputWrappedNum === tokA && outputWrappedNum === tokB) ||
-          (inputWrappedNum === tokB && outputWrappedNum === tokA);
-        
-        if (matchesPair) {
-          matches = true;
-        }
+      const inputWrappedNum = Number(inputWrapped);
+      const outputWrappedNum = Number(outputWrapped);
+      
+      // Check if the wrapped tokens form a valid pair in this pool
+      const matchesPair =
+        (inputWrappedNum === tokA && outputWrappedNum === tokB) ||
+        (inputWrappedNum === tokB && outputWrappedNum === tokA);
+      
+      if (matchesPair) {
+        matches = true;
       }
     } else if (poolDex === 'nomadex') {
       // For Nomadex, check direct token IDs from config
@@ -381,11 +386,26 @@ async function calculateQuoteForPool(poolCfg, inputToken, outputToken, amount, s
     const inputReserve = isDirectionAlphaToBeta ? poolInfo.reserveA : poolInfo.reserveB;
     const outputReserve = isDirectionAlphaToBeta ? poolInfo.reserveB : poolInfo.reserveA;
     
+    
+    // Get token decimals for rate calculation
+    const inputDecimals = await getTokenDecimals(inputTokenNum.toString());
+    const outputDecimals = await getTokenDecimals(outputTokenNum.toString());
+    
     // Calculate quote
     const outputAmount = calculateNomadexOutput(amountBigInt, inputReserve, outputReserve, poolInfo.fee);
     const minimumOutputAmount = (outputAmount * BigInt(Math.floor((1 - slippage) * 10000))) / BigInt(10000);
     const priceImpact = calculatePriceImpact(amountBigInt, inputReserve, outputAmount, outputReserve);
-    const rate = Number(outputAmount) / Number(amountBigInt);
+    
+    // Calculate rate in normalized units (accounting for decimals)
+    // Rate = (outputAmount / 10^outputDecimals) / (inputAmount / 10^inputDecimals)
+    //      = (outputAmount * 10^inputDecimals) / (inputAmount * 10^outputDecimals)
+    // Use BigInt with scaling factor to preserve decimal precision
+    const inputDecimalsMultiplier = BigInt(10) ** BigInt(inputDecimals);
+    const outputDecimalsMultiplier = BigInt(10) ** BigInt(outputDecimals);
+    const scaleFactor = BigInt(10) ** BigInt(18); // Use 18 decimals for precision
+    const numerator = BigInt(outputAmount) * inputDecimalsMultiplier * scaleFactor;
+    const denominator = BigInt(amountBigInt) * outputDecimalsMultiplier;
+    const rate = Number(numerator / denominator) / Number(scaleFactor);
     
     return {
       poolId: poolId.toString(),
@@ -403,22 +423,10 @@ async function calculateQuoteForPool(poolCfg, inputToken, outputToken, amount, s
     };
   } else {
     // Handle HumbleSwap pool
-    const u2w = poolCfg.tokens && poolCfg.tokens.underlyingToWrapped ? poolCfg.tokens.underlyingToWrapped : {};
-    const inputWrapped = u2w[inputTokenStr];
-    const outputWrapped = u2w[outputTokenStr];
-    if (inputWrapped === undefined) {
-      throw new Error(`No wrapped mapping for input token ${inputTokenStr} in pool ${poolId}`);
-    }
-    if (outputWrapped === undefined) {
-      throw new Error(`No wrapped mapping for output token ${outputTokenStr} in pool ${poolId}`);
-    }
+    const { inputWrapped, outputWrapped } = resolveWrappedTokens(poolCfg, inputToken, outputToken);
 
     // Validate wrapped pair matches pool
-    const pair = poolCfg.tokens.wrappedPair || {};
-    const wrappedPairOk =
-      (Number(pair.tokA) === Number(inputWrapped) && Number(pair.tokB) === Number(outputWrapped)) ||
-      (Number(pair.tokA) === Number(outputWrapped) && Number(pair.tokB) === Number(inputWrapped));
-    if (!wrappedPairOk) {
+    if (!validateWrappedPair(poolCfg, inputWrapped, outputWrapped)) {
       throw new Error('Resolved wrapped tokens do not match pool configured pair');
     }
 
@@ -433,36 +441,20 @@ async function calculateQuoteForPool(poolCfg, inputToken, outputToken, amount, s
       poolBals = poolInfo.poolBals;
       protoInfo = poolInfo.protoInfo;
     } else {
-      // Create swap instance using ulujs swap class
-      // Use placeholder address for pool info calls if address is not provided
-      const poolContractId = String(poolCfg.poolId);
-      const addressForInfo = address || algosdk.generateAccount().addr;
-      const swapInstance = new swap(Number(poolContractId), algodClient, indexerClient, {
-        acc: { addr: addressForInfo, sk: new Uint8Array(0) },
-        simulate: true,
-        formatBytes: true,
-        waitForConfirmation: false
-      });
-
-      // Get pool info for quote calculation
-      const infoResult = await swapInstance.Info();
-      if (!infoResult.success) {
-        throw new Error('Failed to fetch pool information: ' + JSON.stringify(infoResult.error));
-      }
-      
-      poolInfo = infoResult.returnValue;
+      // Fetch pool info using humbleswap module
+      poolInfo = await getHumbleswapPoolInfo(poolCfg.poolId, algodClient, indexerClient, poolCfg, address);
       poolBals = poolInfo.poolBals;
       protoInfo = poolInfo.protoInfo;
     }
     
     // Determine swap direction
-    const swapAForB = Number(inputWrapped) === poolInfo.tokA && Number(outputWrapped) === poolInfo.tokB;
+    const swapAForB = inputWrapped === poolInfo.tokA && outputWrapped === poolInfo.tokB;
     const inputReserve = swapAForB ? poolBals.A : poolBals.B;
     const outputReserve = swapAForB ? poolBals.B : poolBals.A;
     
     // Calculate quote
     const totalFee = protoInfo.totFee;
-    const outputAmount = calculateOutputAmount(amount, inputReserve, outputReserve, totalFee);
+    const outputAmount = calculateHumbleswapOutput(amount, inputReserve, outputReserve, totalFee);
     const minimumOutputAmount = (outputAmount * BigInt(Math.floor((1 - slippage) * 10000))) / BigInt(10000);
     const priceImpact = calculatePriceImpact(amount, inputReserve, outputAmount, outputReserve);
     const rate = Number(outputAmount) / Number(amount);
@@ -475,8 +467,8 @@ async function calculateQuoteForPool(poolCfg, inputToken, outputToken, amount, s
       rate: rate,
       priceImpact: priceImpact,
       poolInfo: {
-        inputWrapped: Number(inputWrapped),
-        outputWrapped: Number(outputWrapped),
+        inputWrapped: inputWrapped,
+        outputWrapped: outputWrapped,
         reserveA: inputReserve,
         reserveB: outputReserve,
         fee: totalFee,
@@ -515,22 +507,8 @@ async function calculateOptimalSplit(matchingPools, inputToken, outputToken, tot
     
     const dex = poolCfg.dex || 'humbleswap';
     if (dex === 'humbleswap') {
-      // Fetch HumbleSwap pool info once
-      const poolContractId = Number(poolCfg.poolId);
-      const addressForInfo = address || 'H7W63MIQJMYBOEYPM5NJEGX3P54H54RZIV2G3OQ2255AULG6U74BE5KFC4';
-      const swapInstance = new swap(poolContractId, algodClient, indexerClient, {
-        acc: { addr: addressForInfo, sk: new Uint8Array(0) },
-        simulate: true,
-        formatBytes: true,
-        waitForConfirmation: false
-      });
-      
-      const infoResult = await swapInstance.Info();
-      if (!infoResult.success) {
-        throw new Error('Failed to fetch pool information: ' + JSON.stringify(infoResult.error));
-      }
-      
-      const info = infoResult.returnValue;
+      // Fetch HumbleSwap pool info once using humbleswap module
+      const info = await getHumbleswapPoolInfo(Number(poolCfg.poolId), algodClient, indexerClient, poolCfg, address);
       poolInfoCache.set(poolId, info);
       return info;
     } else if (dex === 'nomadex') {
@@ -545,7 +523,10 @@ async function calculateOptimalSplit(matchingPools, inputToken, outputToken, tot
   // Pre-fetch pool info for ALL pools (both HumbleSwap and Nomadex)
   await Promise.all(
     matchingPools.map(poolCfg => {
-      return getPoolInfo(poolCfg).catch(() => null);
+      return getPoolInfo(poolCfg).catch((err) => {
+        console.warn(`Failed to fetch pool info for pool ${poolCfg.poolId} (${poolCfg.dex || 'humbleswap'}):`, err.message);
+        return null;
+      });
     })
   );
   
@@ -581,8 +562,14 @@ async function calculateOptimalSplit(matchingPools, inputToken, outputToken, tot
     const cachedInfo2 = poolInfoCache.get(String(poolCfg2.poolId)) || null;
     
     // Test both pools with full amount to see if they work
-    const fullQuote1 = await calculateQuoteForPool(poolCfg1, inputToken, outputToken, totalAmount, slippage, address, cachedInfo1).catch(() => null);
-    const fullQuote2 = await calculateQuoteForPool(poolCfg2, inputToken, outputToken, totalAmount, slippage, address, cachedInfo2).catch(() => null);
+    const fullQuote1 = await calculateQuoteForPool(poolCfg1, inputToken, outputToken, totalAmount, slippage, address, cachedInfo1).catch((err) => {
+      console.warn(`Pool ${poolCfg1.poolId} (${poolCfg1.dex || 'humbleswap'}) failed to calculate quote:`, err.message);
+      return null;
+    });
+    const fullQuote2 = await calculateQuoteForPool(poolCfg2, inputToken, outputToken, totalAmount, slippage, address, cachedInfo2).catch((err) => {
+      console.warn(`Pool ${poolCfg2.poolId} (${poolCfg2.dex || 'humbleswap'}) failed to calculate quote:`, err.message);
+      return null;
+    });
     
     if (!fullQuote1 && !fullQuote2) {
       throw new Error('Both pools failed to calculate quotes');
@@ -854,7 +841,8 @@ async function buildMultiPoolTransactions(splitDetails, inputToken, outputToken,
   
   const allTransactions = [];
   
-  for (const split of splitDetails) {
+  for (let i = 0; i < splitDetails.length; i++) {
+    const split = splitDetails[i];
     const { poolCfg, amount, minOutput, quote } = split;
     const poolId = Number(poolCfg.poolId);
     const dex = poolCfg.dex || 'humbleswap';
@@ -894,73 +882,112 @@ async function buildMultiPoolTransactions(splitDetails, inputToken, outputToken,
       });
       
       // Decode transactions to add to group
-      const decodedTxns = poolTransactions.map(txn =>
-        algosdk.decodeUnsignedTransaction(Buffer.from(txn, 'base64'))
-      );
+      // IMPORTANT: We need to preserve foreignAssets and foreignApps when decoding
+      // because they're needed for the app call to access asset/app information
+      const decodedTxns = [];
+      for (let idx = 0; idx < poolTransactions.length; idx++) {
+        const txnBase64 = poolTransactions[idx];
+        const txn = algosdk.decodeUnsignedTransaction(Buffer.from(txnBase64, 'base64'));
+        
+        // For app call transactions, rebuild them properly with foreignAssets/foreignApps
+        // Simply setting properties doesn't work - we need to rebuild the transaction
+        if (txn.type === 'appl' && txn.appIndex === poolId) {
+          // Rebuild foreignAssets array based on token types
+          const foreignAssets = [];
+          if (inputTokenType === 'ASA' && Number(inputToken) !== 0) {
+            foreignAssets.push(Number(inputToken));
+          }
+          if (outputTokenType === 'ASA' && Number(outputToken) !== 0) {
+            foreignAssets.push(Number(outputToken));
+          }
+          const uniqueForeignAssets = [...new Set(foreignAssets)];
+          
+          // Rebuild foreignApps array
+          const factoryAppId = 411751;
+          const foreignApps = [factoryAppId];
+          if (inputTokenType === 'ARC200' && Number(inputToken) !== 0) {
+            if (!foreignApps.includes(Number(inputToken))) {
+              foreignApps.push(Number(inputToken));
+            }
+          }
+          if (outputTokenType === 'ARC200' && Number(outputToken) !== 0) {
+            if (!foreignApps.includes(Number(outputToken))) {
+              foreignApps.push(Number(outputToken));
+            }
+          }
+          
+          // Rebuild the app call transaction with proper foreignAssets/foreignApps
+          // Use makeApplicationCallTxnFromObject to ensure these are properly encoded
+          // Convert txn.from (Uint8Array) to address string
+          const fromAddress = algosdk.encodeAddress(txn.from.publicKey);
+          const suggestedParams = await algodClient.getTransactionParams().do();
+          
+          // Build transaction object, only including optional fields if they exist and are valid
+          const txnObj = {
+            from: fromAddress,
+            appIndex: txn.appIndex,
+            onComplete: txn.appOnComplete,
+            appArgs: txn.appArgs,
+            foreignApps: foreignApps,
+            foreignAssets: uniqueForeignAssets.length > 0 ? uniqueForeignAssets : undefined,
+            suggestedParams: {
+              ...suggestedParams,
+              fee: txn.fee,
+              firstRound: txn.firstRound,
+              lastRound: txn.lastRound,
+              genesisHash: txn.genesisHash,
+              genesisID: txn.genesisID
+            }
+          };
+          
+          // Only include optional fields if they exist and are valid
+          if (txn.accounts && txn.accounts.length > 0) {
+            txnObj.accounts = txn.accounts.map(acc => algosdk.encodeAddress(acc.publicKey));
+          }
+          if (txn.note && txn.note.length > 0) {
+            txnObj.note = txn.note;
+          }
+          if (txn.lease && txn.lease.length === 32) {
+            txnObj.lease = txn.lease;
+          }
+          if (txn.rekeyTo) {
+            txnObj.rekeyTo = algosdk.encodeAddress(txn.rekeyTo.publicKey);
+          }
+          
+          const rebuiltTxn = algosdk.makeApplicationCallTxnFromObject(txnObj);
+          decodedTxns.push(rebuiltTxn);
+        } else {
+          // For non-app-call transactions, just use the decoded transaction as-is
+          decodedTxns.push(txn);
+        }
+      }
       
       allTransactions.push(...decodedTxns);
     } else {
-      // Build HumbleSwap transactions
-      const u2w = poolCfg.tokens?.underlyingToWrapped || {};
-      const inputWrapped = u2w[inputTokenStr];
-      const outputWrapped = u2w[outputTokenStr];
-      
-      if (inputWrapped === undefined || outputWrapped === undefined) {
-        throw new Error(`Missing wrapped token mappings for pool ${poolId}`);
-      }
+      // Build HumbleSwap transactions using humbleswap module
+      const { inputWrapped, outputWrapped } = resolveWrappedTokens(poolCfg, inputToken, outputToken);
       
       // Get decimals
       const inputDecimals = await getTokenDecimals(inputTokenStr);
       const outputDecimals = await getTokenDecimals(outputTokenStr);
-      const amountInDecimal = Number(amountBigInt) / (10 ** inputDecimals);
       
-      // Create swap instance
-      const swapInstance = new swap(poolId, algodClient, indexerClient, {
-        acc: { addr: address, sk: new Uint8Array(0) },
-        simulate: true,
-        formatBytes: true,
-        waitForConfirmation: false
+      // Build swap transactions using humbleswap module
+      const decodedTxns = await buildHumbleswapSwapTransactions({
+        sender: address,
+        poolId: poolId,
+        inputToken: inputTokenStr,
+        outputToken: outputTokenStr,
+        amountIn: amountBigInt.toString(),
+        minAmountOut: minOutput,
+        inputWrapped: inputWrapped,
+        outputWrapped: outputWrapped,
+        inputDecimals: inputDecimals,
+        outputDecimals: outputDecimals,
+        slippage: slippage,
+        algodClient: algodClient,
+        indexerClient: indexerClient,
+        getTokenMetaFromConfig: getTokenMetaFromConfig
       });
-      
-      // Build token objects
-      const tokenA = {
-        contractId: Number(inputWrapped),
-        tokenId: inputTokenStr,
-        amount: amountInDecimal.toString(),
-        decimals: inputDecimals,
-        symbol: (getTokenMetaFromConfig(inputWrapped) || {}).symbol || undefined
-      };
-      
-      const tokenB = {
-        contractId: Number(outputWrapped),
-        tokenId: outputTokenStr,
-        decimals: outputDecimals,
-        symbol: (getTokenMetaFromConfig(outputWrapped) || {}).symbol || undefined
-      };
-      
-      // Generate swap transactions
-      const swapResult = await swapInstance.swap(
-        address,
-        poolId,
-        tokenA,
-        tokenB,
-        [], // extraTxns
-        {
-          debug: false,
-          slippage: slippage,
-          degenMode: false,
-          skipWithdraw: false
-        }
-      );
-      
-      if (!swapResult || !swapResult.success) {
-        throw new Error(`Failed to generate swap transactions for pool ${poolId}: ${JSON.stringify(swapResult?.error || 'Unknown error')}`);
-      }
-      
-      // Decode transactions to add to group
-      const decodedTxns = swapResult.txns.map(txn =>
-        algosdk.decodeUnsignedTransaction(Buffer.from(txn, 'base64'))
-      );
       
       allTransactions.push(...decodedTxns);
     }
@@ -981,6 +1008,106 @@ async function buildMultiPoolTransactions(splitDetails, inputToken, outputToken,
   return allTransactions.map(txn => 
     Buffer.from(algosdk.encodeUnsignedTransaction(txn)).toString('base64')
   );
+}
+
+/**
+ * Handle HumbleSwap quote request
+ */
+async function handleHumbleswapQuote(req, res, params) {
+  try {
+    const { address, inputToken, outputToken, amount, slippage, poolContractId, poolCfg } = params;
+
+    // Resolve wrapped tokens
+    const { inputWrapped, outputWrapped } = resolveWrappedTokens(poolCfg, inputToken, outputToken);
+
+    // Validate wrapped pair matches pool
+    if (!validateWrappedPair(poolCfg, inputWrapped, outputWrapped)) {
+      return res.status(400).json({ error: 'Resolved wrapped tokens do not match pool configured pair' });
+    }
+
+    // Get pool info
+    const addressForInfo = address || algosdk.generateAccount().addr;
+    const poolInfo = await getHumbleswapPoolInfo(poolContractId, algodClient, indexerClient, poolCfg, addressForInfo);
+    const { poolBals, protoInfo } = poolInfo;
+
+    // Determine swap direction
+    const swapAForB = inputWrapped === poolInfo.tokA && outputWrapped === poolInfo.tokB;
+    const inputReserve = swapAForB ? poolBals.A : poolBals.B;
+    const outputReserve = swapAForB ? poolBals.B : poolBals.A;
+
+    // Get token decimals for rate calculation
+    const inputDecimals = await getTokenDecimals(String(inputToken));
+    const outputDecimals = await getTokenDecimals(String(outputToken));
+    
+    // Calculate quote
+    const amountBigInt = BigInt(amount);
+    const totalFee = protoInfo.totFee;
+    const outputAmount = calculateHumbleswapOutput(amountBigInt, inputReserve, outputReserve, totalFee);
+    const minimumOutputAmount = (outputAmount * BigInt(Math.floor((1 - slippage) * 10000))) / BigInt(10000);
+    const priceImpact = calculatePriceImpact(amountBigInt, inputReserve, outputAmount, outputReserve);
+    const rate = Number(outputAmount) / Number(amountBigInt);
+
+    // Build swap transactions (only if address is provided)
+    let unsignedTransactions = [];
+    if (address) {
+      try {
+        const decodedTxns = await buildHumbleswapSwapTransactions({
+          sender: address,
+          poolId: poolContractId,
+          inputToken: String(inputToken),
+          outputToken: String(outputToken),
+          amountIn: amountBigInt.toString(),
+          minAmountOut: minimumOutputAmount.toString(),
+          inputWrapped: inputWrapped,
+          outputWrapped: outputWrapped,
+          inputDecimals: inputDecimals,
+          outputDecimals: outputDecimals,
+          slippage: slippage,
+          algodClient: algodClient,
+          indexerClient: indexerClient,
+          getTokenMetaFromConfig: getTokenMetaFromConfig
+        });
+        
+        // Encode transactions to base64
+        unsignedTransactions = decodedTxns.map(txn => 
+          Buffer.from(algosdk.encodeUnsignedTransaction(txn)).toString('base64')
+        );
+      } catch (txnError) {
+        console.error('Error building HumbleSwap transactions:', txnError);
+        return res.status(200).json({
+          quote: {
+            inputAmount: amountBigInt.toString(),
+            outputAmount: outputAmount.toString(),
+            minimumOutputAmount: minimumOutputAmount.toString(),
+            rate: rate,
+            priceImpact: priceImpact
+          },
+          unsignedTransactions: [],
+          poolId: poolContractId.toString(),
+          error: 'Failed to generate swap transactions: ' + txnError.message
+        });
+      }
+    }
+
+    res.json({
+      quote: {
+        inputAmount: amountBigInt.toString(),
+        outputAmount: outputAmount.toString(),
+        minimumOutputAmount: minimumOutputAmount.toString(),
+        rate: rate,
+        priceImpact: priceImpact
+      },
+      unsignedTransactions: unsignedTransactions,
+      poolId: poolContractId.toString()
+    });
+
+  } catch (error) {
+    console.error('Error generating HumbleSwap quote:', error);
+    res.status(500).json({
+      error: 'Internal server error',
+      message: error.message
+    });
+  }
 }
 
 /**
@@ -1035,6 +1162,10 @@ async function handleNomadexQuote(req, res, params) {
     const inputReserve = isDirectionAlphaToBeta ? poolInfo.reserveA : poolInfo.reserveB;
     const outputReserve = isDirectionAlphaToBeta ? poolInfo.reserveB : poolInfo.reserveA;
 
+    // Get token decimals for rate calculation
+    const inputDecimals = await getTokenDecimals(inputTokenNum.toString());
+    const outputDecimals = await getTokenDecimals(outputTokenNum.toString());
+    
     // Calculate quote
     const amountBigInt = BigInt(amount);
     const outputAmount = calculateNomadexOutput(amountBigInt, inputReserve, outputReserve, poolInfo.fee);
@@ -1046,7 +1177,18 @@ async function handleNomadexQuote(req, res, params) {
     const safetyMargin = BigInt(99); // 99% of minimum (1% buffer)
     const adjustedMinimumOutput = (minimumOutputAmount * safetyMargin) / BigInt(100);
     const priceImpact = calculatePriceImpact(amountBigInt, inputReserve, outputAmount, outputReserve);
-    const rate = Number(outputAmount) / Number(amountBigInt);
+    
+    // Calculate rate in normalized units (accounting for decimals)
+    // Rate = (outputAmount / 10^outputDecimals) / (inputAmount / 10^inputDecimals)
+    //      = (outputAmount * 10^inputDecimals) / (inputAmount * 10^outputDecimals)
+    // Use BigInt with scaling factor to preserve decimal precision
+    // outputAmount is already a BigInt from calculateNomadexOutput, no need to wrap it
+    const inputDecimalsMultiplier = BigInt(10) ** BigInt(inputDecimals);
+    const outputDecimalsMultiplier = BigInt(10) ** BigInt(outputDecimals);
+    const scaleFactor = BigInt(10) ** BigInt(18); // Use 18 decimals for precision
+    const numerator = outputAmount * inputDecimalsMultiplier * scaleFactor;
+    const denominator = amountBigInt * outputDecimalsMultiplier;
+    const rate = Number(numerator / denominator) / Number(scaleFactor);
 
     // Build swap transactions (only if address is provided)
     let unsignedTransactions = [];
@@ -1149,125 +1291,15 @@ app.post('/quote', async (req, res) => {
           poolCfg
         });
       } else {
-        // Handle HumbleSwap pool (existing logic)
-        const u2w = poolCfg.tokens && poolCfg.tokens.underlyingToWrapped ? poolCfg.tokens.underlyingToWrapped : {};
-        const inputWrapped = u2w[inputTokenStr];
-        const outputWrapped = u2w[outputTokenStr];
-        if (inputWrapped === undefined) {
-          return res.status(400).json({ error: `No wrapped mapping for input token ${inputTokenStr} in pool ${poolContractId}` });
-        }
-        if (outputWrapped === undefined) {
-          return res.status(400).json({ error: `No wrapped mapping for output token ${outputTokenStr} in pool ${poolContractId}` });
-        }
-
-        // Validate wrapped pair matches pool
-        const pair = poolCfg.tokens.wrappedPair || {};
-        const wrappedPairOk =
-          (Number(pair.tokA) === Number(inputWrapped) && Number(pair.tokB) === Number(outputWrapped)) ||
-          (Number(pair.tokA) === Number(outputWrapped) && Number(pair.tokB) === Number(inputWrapped));
-        if (!wrappedPairOk) {
-          return res.status(400).json({ error: 'Resolved wrapped tokens do not match pool configured pair' });
-        }
-
-        // Create swap instance using ulujs swap class
-        // Use placeholder address for pool info calls if address is not provided
-        const addressForInfo = address || algosdk.generateAccount().addr;
-        const swapInstance = new swap(Number(poolContractId), algodClient, indexerClient, {
-          acc: { addr: addressForInfo, sk: new Uint8Array(0) },
-          simulate: true,
-          formatBytes: true,
-          waitForConfirmation: false
-        });
-
-        // Build token objects for swap using local config and decimals cache
-        const inputDecimals = await getTokenDecimals(inputTokenStr);
-        const outputDecimals = await getTokenDecimals(outputTokenStr);
-        const amountInDecimal = Number(amount) / (10 ** inputDecimals);
-
-        const tokenA = {
-          contractId: Number(inputWrapped),
-          tokenId: inputTokenStr,
-          amount: amountInDecimal.toString(),
-          decimals: inputDecimals,
-          symbol: (getTokenMetaFromConfig(inputWrapped) || {}).symbol || undefined
-        };
-
-        const tokenB = {
-          contractId: Number(outputWrapped),
-          tokenId: outputTokenStr,
-          decimals: outputDecimals,
-          symbol: (getTokenMetaFromConfig(outputWrapped) || {}).symbol || undefined
-        };
-
-        // Get pool info for quote calculation
-        const infoResult = await swapInstance.Info();
-        if (!infoResult.success) {
-          return res.status(500).json({
-            error: 'Failed to fetch pool information',
-            details: infoResult.error
-          });
-        }
-
-        const poolInfo = infoResult.returnValue;
-        const { poolBals, protoInfo } = poolInfo;
-
-        // Determine swap direction
-        const swapAForB = tokenA.contractId === poolInfo.tokA && tokenB.contractId === poolInfo.tokB;
-        const inputReserve = swapAForB ? poolBals.A : poolBals.B;
-        const outputReserve = swapAForB ? poolBals.B : poolBals.A;
-
-        // Calculate quote
-        const totalFee = protoInfo.totFee;
-        const outputAmount = calculateOutputAmount(amount, inputReserve, outputReserve, totalFee);
-        const minimumOutputAmount = (outputAmount * BigInt(Math.floor((1 - slippage) * 10000))) / BigInt(10000);
-        const priceImpact = calculatePriceImpact(amount, inputReserve, outputAmount, outputReserve);
-        const rate = Number(outputAmount) / Number(amount);
-
-        // Generate swap transactions (only if address is provided)
-        let unsignedTransactions = [];
-        if (address) {
-          const swapResult = await swapInstance.swap(
-            address,
-            Number(poolContractId),
-            tokenA,
-            tokenB,
-            [], // extraTxns
-            {
-              debug: false,
-              slippage: slippage,
-              degenMode: false,
-              skipWithdraw: false
-            }
-          );
-
-          if (!swapResult || !swapResult.success) {
-            return res.status(200).json({
-              quote: {
-                inputAmount: amount.toString(),
-                outputAmount: outputAmount.toString(),
-                minimumOutputAmount: minimumOutputAmount.toString(),
-                rate: rate,
-                priceImpact: priceImpact
-              },
-              unsignedTransactions: [],
-              poolId: poolContractId.toString(),
-              error: 'Failed to generate swap transactions' + (swapResult?.error ? `: ${JSON.stringify(swapResult.error)}` : '')
-            });
-          }
-          
-          unsignedTransactions = swapResult.txns;
-        }
-
-        return res.json({
-          quote: {
-            inputAmount: amount.toString(),
-            outputAmount: outputAmount.toString(),
-            minimumOutputAmount: minimumOutputAmount.toString(),
-            rate: rate,
-            priceImpact: priceImpact
-          },
-          unsignedTransactions: unsignedTransactions,
-          poolId: poolContractId.toString()
+        // Handle HumbleSwap pool using humbleswap module
+        return await handleHumbleswapQuote(req, res, {
+          address,
+          inputToken: inputTokenStr,
+          outputToken: outputTokenStr,
+          amount,
+          slippage,
+          poolContractId,
+          poolCfg
         });
       }
     }
@@ -1306,7 +1338,13 @@ app.post('/quote', async (req, res) => {
       const totalOutput = splitDetails.reduce((sum, split) => sum + BigInt(split.expectedOutput), 0n);
       const totalMinOutput = splitDetails.reduce((sum, split) => sum + BigInt(split.minOutput), 0n);
       const totalInput = BigInt(amount);
-      const overallRate = Number(totalOutput) / Number(totalInput);
+      
+      // Calculate rate in normalized units (accounting for decimals)
+      const inputDecimals = await getTokenDecimals(inputToken);
+      const outputDecimals = await getTokenDecimals(outputToken);
+      const inputDecimalsMultiplier = BigInt(10) ** BigInt(inputDecimals);
+      const outputDecimalsMultiplier = BigInt(10) ** BigInt(outputDecimals);
+      const overallRate = Number((totalOutput * inputDecimalsMultiplier) / (totalInput * outputDecimalsMultiplier));
       
       // Calculate weighted average price impact
       const totalInputNum = Number(totalInput);
@@ -1343,7 +1381,16 @@ app.post('/quote', async (req, res) => {
     const totalOutput = splitDetails.reduce((sum, split) => sum + BigInt(split.expectedOutput), 0n);
     const totalMinOutput = splitDetails.reduce((sum, split) => sum + BigInt(split.minOutput), 0n);
     const totalInput = BigInt(amount);
-    const overallRate = Number(totalOutput) / Number(totalInput);
+    
+    // Calculate rate in normalized units (accounting for decimals)
+    const inputDecimals = await getTokenDecimals(inputToken);
+    const outputDecimals = await getTokenDecimals(outputToken);
+    const inputDecimalsMultiplier = BigInt(10) ** BigInt(inputDecimals);
+    const outputDecimalsMultiplier = BigInt(10) ** BigInt(outputDecimals);
+    const scaleFactor = BigInt(10) ** BigInt(18); // Use 18 decimals for precision
+    const numerator = totalOutput * inputDecimalsMultiplier * scaleFactor;
+    const denominator = totalInput * outputDecimalsMultiplier;
+    const overallRate = Number(numerator / denominator) / Number(scaleFactor);
     
     // Calculate weighted average price impact
     const totalInputNum = Number(totalInput);
@@ -1362,13 +1409,6 @@ app.post('/quote', async (req, res) => {
         outputAmount: split.expectedOutput
       }))
     };
-
-    console.log('Quote:', {
-      input: totalInput.toString(),
-      output: totalOutput.toString(),
-      rate: overallRate.toFixed(6),
-      pools: route.pools.map(p => `${p.poolId}(${p.dex}):${p.inputAmount}`).join(' + ')
-    });
 
     res.json({
       quote: {
@@ -1431,39 +1471,37 @@ app.get('/pool/:poolId', async (req, res) => {
         });
       }
     } else {
-      // Handle HumbleSwap pool (existing logic)
-      const swapContract = new swap200(Number(poolId), algodClient, indexerClient);
-      const infoResult = await swapContract.Info();
+      // Handle HumbleSwap pool using humbleswap module
+      try {
+        const poolInfo = await getHumbleswapPoolInfo200(Number(poolId), algodClient, indexerClient);
 
-      if (!infoResult.success) {
+        res.json({
+          poolId: poolId,
+          dex: 'humbleswap',
+          tokA: poolInfo.tokA,
+          tokB: poolInfo.tokB,
+          reserves: {
+            A: poolInfo.poolBals.A,
+            B: poolInfo.poolBals.B
+          },
+          fees: {
+            protoFee: poolInfo.protoInfo.protoFee,
+            lpFee: poolInfo.protoInfo.lpFee,
+            totFee: poolInfo.protoInfo.totFee
+          },
+          liquidity: {
+            lpHeld: poolInfo.lptBals.lpHeld,
+            lpMinted: poolInfo.lptBals.lpMinted
+          },
+          locked: poolInfo.protoInfo.locked
+        });
+      } catch (error) {
+        console.error('Error fetching HumbleSwap pool info:', error);
         return res.status(500).json({
           error: 'Failed to fetch pool information',
-          details: infoResult.error
+          details: error.message
         });
       }
-
-      const poolInfo = infoResult.returnValue;
-
-      res.json({
-        poolId: poolId,
-        dex: 'humbleswap',
-        tokA: poolInfo.tokA,
-        tokB: poolInfo.tokB,
-        reserves: {
-          A: poolInfo.poolBals.A,
-          B: poolInfo.poolBals.B
-        },
-        fees: {
-          protoFee: poolInfo.protoInfo.protoFee,
-          lpFee: poolInfo.protoInfo.lpFee,
-          totFee: poolInfo.protoInfo.totFee
-        },
-        liquidity: {
-          lpHeld: poolInfo.lptBals.lpHeld,
-          lpMinted: poolInfo.lptBals.lpMinted
-        },
-        locked: poolInfo.protoInfo.locked
-      });
     }
 
   } catch (error) {
