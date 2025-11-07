@@ -2,6 +2,7 @@
   "pools": [
     {
       "poolId": 395553,
+      "dex": "humbleswap",
       "name": "USDC/VOI (ARC200)",
       "tokens": {
         "underlyingToWrapped": {
@@ -13,6 +14,22 @@
           "tokB": 395614
         },
         "unwrap": [390001]
+      },
+      "slippageDefault": 0.01
+    },
+    {
+      "poolId": 411756,
+      "dex": "nomadex",
+      "name": "USDC/VOI",
+      "tokens": {
+        "tokA": {
+          "id": 0,
+          "type": "native"
+        },
+        "tokB": {
+          "id": 302190,
+          "type": "ASA"
+        }
       },
       "slippageDefault": 0.01
     }

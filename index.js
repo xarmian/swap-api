@@ -6,6 +6,12 @@ import dotenv from 'dotenv';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import {
+  getPoolInfo as getNomadexPoolInfo,
+  calculateOutputAmount as calculateNomadexOutput,
+  buildSwapTransactions as buildNomadexSwapTransactions,
+  getTokenTypeFromConfig
+} from './lib/nomadex.js';
 
 dotenv.config();
 
@@ -162,6 +168,117 @@ function calculatePriceImpact(inputAmount, inputReserve, outputAmount, outputRes
 
 // No external token lookup; use local config
 
+/**
+ * Handle Nomadex quote request
+ */
+async function handleNomadexQuote(req, res, params) {
+  try {
+    const { address, inputToken, outputToken, amount, slippage, poolContractId, poolCfg } = params;
+
+    // Validate tokens match pool configuration
+    const tokA = poolCfg.tokens?.tokA;
+    const tokB = poolCfg.tokens?.tokB;
+    
+    if (!tokA || !tokB) {
+      return res.status(400).json({ error: 'Invalid pool configuration: missing token information' });
+    }
+
+    const inputTokenNum = Number(inputToken);
+    const outputTokenNum = Number(outputToken);
+    const tokANum = Number(tokA.id);
+    const tokBNum = Number(tokB.id);
+
+    // Validate input/output tokens match pool
+    const validPair =
+      (inputTokenNum === tokANum && outputTokenNum === tokBNum) ||
+      (inputTokenNum === tokBNum && outputTokenNum === tokANum);
+
+    if (!validPair) {
+      return res.status(400).json({
+        error: `Token pair (${inputToken}, ${outputToken}) does not match pool tokens (${tokANum}, ${tokBNum})`
+      });
+    }
+
+    // Get token types from config
+    const inputTokenType = getTokenTypeFromConfig(poolCfg, inputTokenNum);
+    const outputTokenType = getTokenTypeFromConfig(poolCfg, outputTokenNum);
+
+    if (!inputTokenType || !outputTokenType) {
+      return res.status(400).json({ error: 'Could not determine token types from pool configuration' });
+    }
+
+    // Get pool info
+    const poolInfo = await getNomadexPoolInfo(poolContractId, algodClient, indexerClient, poolCfg);
+
+    // Note: tokA can be 0 (native token), so we check for null/undefined explicitly
+    if (poolInfo.tokA === null || poolInfo.tokA === undefined || poolInfo.tokB === null || poolInfo.tokB === undefined) {
+      return res.status(500).json({ error: 'Failed to determine pool token IDs' });
+    }
+
+    // Determine swap direction (alpha to beta = tokA to tokB)
+    const isDirectionAlphaToBeta = inputTokenNum === poolInfo.tokA && outputTokenNum === poolInfo.tokB;
+    const inputReserve = isDirectionAlphaToBeta ? poolInfo.reserveA : poolInfo.reserveB;
+    const outputReserve = isDirectionAlphaToBeta ? poolInfo.reserveB : poolInfo.reserveA;
+
+    // Calculate quote
+    const amountBigInt = BigInt(amount);
+    const outputAmount = calculateNomadexOutput(amountBigInt, inputReserve, outputReserve, poolInfo.fee);
+    const minimumOutputAmount = (outputAmount * BigInt(Math.floor((1 - slippage) * 10000))) / BigInt(10000);
+    const priceImpact = calculatePriceImpact(amountBigInt, inputReserve, outputAmount, outputReserve);
+    const rate = Number(outputAmount) / Number(amountBigInt);
+
+    // Build swap transactions
+    let unsignedTransactions = [];
+    try {
+      unsignedTransactions = await buildNomadexSwapTransactions({
+        sender: address,
+        poolId: poolContractId,
+        inputToken: inputTokenNum,
+        outputToken: outputTokenNum,
+        amountIn: amountBigInt.toString(),
+        minAmountOut: minimumOutputAmount.toString(),
+        isDirectionAlphaToBeta,
+        inputTokenType,
+        outputTokenType,
+        algodClient
+      });
+    } catch (txnError) {
+      console.error('Error building Nomadex transactions:', txnError);
+      return res.status(200).json({
+        quote: {
+          inputAmount: amountBigInt.toString(),
+          outputAmount: outputAmount.toString(),
+          minimumOutputAmount: minimumOutputAmount.toString(),
+          rate: rate,
+          priceImpact: priceImpact
+        },
+        unsignedTransactions: [],
+        poolId: poolContractId.toString(),
+        error: 'Failed to generate swap transactions: ' + txnError.message
+      });
+    }
+
+    res.json({
+      quote: {
+        inputAmount: amountBigInt.toString(),
+        outputAmount: outputAmount.toString(),
+        minimumOutputAmount: minimumOutputAmount.toString(),
+        rate: rate,
+        priceImpact: priceImpact
+      },
+      unsignedTransactions: unsignedTransactions,
+      poolId: poolContractId.toString()
+    });
+
+  } catch (error) {
+    console.error('Error generating Nomadex quote:', error);
+    res.status(500).json({
+      error: 'Internal server error',
+      message: error.message
+    });
+  }
+}
+
 // POST /quote endpoint
 app.post('/quote', async (req, res) => {
   try {
@@ -186,7 +303,7 @@ app.post('/quote', async (req, res) => {
 
     const poolContractId = poolId;
 
-    // Load pool config and map underlying to wrapped
+    // Load pool config
     const poolCfg = getPoolConfigById(poolContractId);
     if (!poolCfg) {
       return res.status(400).json({ error: `Pool ${poolContractId} not found in config` });
@@ -194,24 +311,40 @@ app.post('/quote', async (req, res) => {
 
     const inputTokenStr = String(inputToken);
     const outputTokenStr = String(outputToken);
+    const dex = poolCfg.dex || 'humbleswap'; // Default to humbleswap for backward compatibility
 
-    const u2w = poolCfg.tokens && poolCfg.tokens.underlyingToWrapped ? poolCfg.tokens.underlyingToWrapped : {};
-    const inputWrapped = u2w[inputTokenStr];
-    const outputWrapped = u2w[outputTokenStr];
-    if (inputWrapped === undefined) {
-      return res.status(400).json({ error: `No wrapped mapping for input token ${inputTokenStr} in pool ${poolContractId}` });
-    }
-    if (outputWrapped === undefined) {
-      return res.status(400).json({ error: `No wrapped mapping for output token ${outputTokenStr} in pool ${poolContractId}` });
-    }
+    // Route to appropriate DEX handler
+    if (dex === 'nomadex') {
+      // Handle Nomadex pool
+      return await handleNomadexQuote(req, res, {
+        address,
+        inputToken: inputTokenStr,
+        outputToken: outputTokenStr,
+        amount,
+        slippage,
+        poolContractId,
+        poolCfg
+      });
+    } else {
+      // Handle HumbleSwap pool (existing logic)
+      const u2w = poolCfg.tokens && poolCfg.tokens.underlyingToWrapped ? poolCfg.tokens.underlyingToWrapped : {};
+      const inputWrapped = u2w[inputTokenStr];
+      const outputWrapped = u2w[outputTokenStr];
+      if (inputWrapped === undefined) {
+        return res.status(400).json({ error: `No wrapped mapping for input token ${inputTokenStr} in pool ${poolContractId}` });
+      }
+      if (outputWrapped === undefined) {
+        return res.status(400).json({ error: `No wrapped mapping for output token ${outputTokenStr} in pool ${poolContractId}` });
+      }
 
-    // Validate wrapped pair matches pool
-    const pair = poolCfg.tokens.wrappedPair || {};
-    const wrappedPairOk =
-      (Number(pair.tokA) === Number(inputWrapped) && Number(pair.tokB) === Number(outputWrapped)) ||
-      (Number(pair.tokA) === Number(outputWrapped) && Number(pair.tokB) === Number(inputWrapped));
-    if (!wrappedPairOk) {
-      return res.status(400).json({ error: 'Resolved wrapped tokens do not match pool configured pair' });
+      // Validate wrapped pair matches pool
+      const pair = poolCfg.tokens.wrappedPair || {};
+      const wrappedPairOk =
+        (Number(pair.tokA) === Number(inputWrapped) && Number(pair.tokB) === Number(outputWrapped)) ||
+        (Number(pair.tokA) === Number(outputWrapped) && Number(pair.tokB) === Number(inputWrapped));
+      if (!wrappedPairOk) {
+        return res.status(400).json({ error: 'Resolved wrapped tokens do not match pool configured pair' });
+      }
     }
 
     // Create swap instance using ulujs swap class
@@ -327,37 +460,70 @@ app.get('/pool/:poolId', async (req, res) => {
       return res.status(400).json({ error: 'Pool ID is required' });
     }
 
-    const swapContract = new swap200(Number(poolId), algodClient, indexerClient);
-    const infoResult = await swapContract.Info();
+    // Get pool config to determine DEX type
+    const poolCfg = getPoolConfigById(poolId);
+    const dex = poolCfg?.dex || 'humbleswap';
 
-    if (!infoResult.success) {
-      return res.status(500).json({
-        error: 'Failed to fetch pool information',
-        details: infoResult.error
+    if (dex === 'nomadex') {
+      // Handle Nomadex pool
+      try {
+        const poolInfo = await getNomadexPoolInfo(Number(poolId), algodClient, indexerClient, poolCfg);
+        
+        res.json({
+          poolId: poolId,
+          dex: 'nomadex',
+          tokA: poolInfo.tokA,
+          tokB: poolInfo.tokB,
+          reserves: {
+            A: poolInfo.reserveA,
+            B: poolInfo.reserveB
+          },
+          fees: {
+            totFee: poolInfo.fee
+          }
+        });
+      } catch (error) {
+        console.error('Error fetching Nomadex pool info:', error);
+        return res.status(500).json({
+          error: 'Failed to fetch pool information',
+          details: error.message
+        });
+      }
+    } else {
+      // Handle HumbleSwap pool (existing logic)
+      const swapContract = new swap200(Number(poolId), algodClient, indexerClient);
+      const infoResult = await swapContract.Info();
+
+      if (!infoResult.success) {
+        return res.status(500).json({
+          error: 'Failed to fetch pool information',
+          details: infoResult.error
+        });
+      }
+
+      const poolInfo = infoResult.returnValue;
+
+      res.json({
+        poolId: poolId,
+        dex: 'humbleswap',
+        tokA: poolInfo.tokA,
+        tokB: poolInfo.tokB,
+        reserves: {
+          A: poolInfo.poolBals.A,
+          B: poolInfo.poolBals.B
+        },
+        fees: {
+          protoFee: poolInfo.protoInfo.protoFee,
+          lpFee: poolInfo.protoInfo.lpFee,
+          totFee: poolInfo.protoInfo.totFee
+        },
+        liquidity: {
+          lpHeld: poolInfo.lptBals.lpHeld,
+          lpMinted: poolInfo.lptBals.lpMinted
+        },
+        locked: poolInfo.protoInfo.locked
       });
     }
-
-    const poolInfo = infoResult.returnValue;
-
-    res.json({
-      poolId: poolId,
-      tokA: poolInfo.tokA,
-      tokB: poolInfo.tokB,
-      reserves: {
-        A: poolInfo.poolBals.A,
-        B: poolInfo.poolBals.B
-      },
-      fees: {
-        protoFee: poolInfo.protoInfo.protoFee,
-        lpFee: poolInfo.protoInfo.lpFee,
-        totFee: poolInfo.protoInfo.totFee
-      },
-      liquidity: {
-        lpHeld: poolInfo.lptBals.lpHeld,
-        lpMinted: poolInfo.lptBals.lpMinted
-      },
-      locked: poolInfo.protoInfo.locked
-    });
 
   } catch (error) {
     console.error('Error fetching pool info:', error);
