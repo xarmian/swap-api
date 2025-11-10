@@ -36,6 +36,56 @@
         "fee": 100
     },
     {
+      "poolId": 40120385,
+      "dex": "humbleswap",
+      "name": "POW/VOI",
+      "tokens": {
+        "underlyingToWrapped": {
+          "0": 390001
+        },
+        "wrappedPair": {
+          "tokA": 40153155,
+          "tokB": 390001
+        },
+        "unwrap": [390001]
+      },
+      "slippageDefault": 0.01,
+      "fee": 100
+    },
+    {
+      "poolId": 946307,
+      "dex": "humbleswap",
+      "name": "SHELLY/VOI",
+      "tokens": {
+        "underlyingToWrapped": {
+          "0": 390001
+        },
+        "wrappedPair": {
+          "tokA": 410111,
+          "tokB": 390001
+        },
+        "unwrap": [390001]
+      },
+      "slippageDefault": 0.01,
+      "fee": 100
+    },
+    {
+      "poolId": 40171094,
+      "dex": "humbleswap",
+      "name": "SHELLY/POW",
+      "tokens": {
+        "underlyingToWrapped": {
+        },
+        "wrappedPair": {
+          "tokA": 410111,
+          "tokB": 40153155
+        },
+        "unwrap": []
+      },
+      "slippageDefault": 0.01,
+      "fee": 100
+    },
+    {
       "poolId": 411756,
       "dex": "nomadex",
       "name": "VOI/USDC",
