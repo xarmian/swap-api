@@ -76,7 +76,37 @@ Response:
 }
 ```
 
-## Example 3: Using the Test Script
+## Example 3: Build Unwrap Transactions
+
+Build an atomic group that unwraps multiple tokens in one go:
+
+```bash
+curl -X POST http://localhost:3000/unwrap \
+  -H "Content-Type: application/json" \
+  -d '{
+    "address": "4LI2Z52C3WKIPFTVMCUJ5LSYU4KLUA6JNMQAQQRI6RAVIMZWAPI52F5YKY",
+    "items": [
+      { "wrappedTokenId": 390001, "amount": "1000000" },
+      { "wrappedTokenId": 395614, "amount": "500000" }
+    ]
+  }'
+```
+
+Example response (trimmed):
+
+```json
+{
+  "address": "4LI2Z52C3WKIPFTVMCUJ5LSYU4KLUA6JNMQAQQRI6RAVIMZWAPI52F5YKY",
+  "items": [
+    { "wrappedTokenId": "390001", "unwrappedTokenId": "0", "amount": "1000000" },
+    { "wrappedTokenId": "395614", "unwrappedTokenId": "302190", "amount": "500000" }
+  ],
+  "unsignedTransactions": ["..."],
+  "networkFee": "..."
+}
+```
+
+## Example 4: Using the Test Script
 
 Run the included test script:
 
@@ -86,7 +116,7 @@ node test-quote.js
 
 This will test both the health endpoint and the quote endpoint.
 
-## Example 4: Signing and Submitting Transactions
+## Example 5: Signing and Submitting Transactions
 
 After getting the unsigned transactions from the API, you need to:
 

@@ -1,6 +1,6 @@
 import express from 'express';
 import cors from 'cors';
-import { handleQuote } from './lib/handlers.js';
+import { handleQuote, handleUnwrap } from './lib/handlers.js';
 import { getPoolConfigById, loadConfigsOnce, poolsConfig, initializeConfig } from './lib/config.js';
 import { getAllTokens } from './lib/discovery.js';
 import { algodClient, indexerClient } from './lib/clients.js';
@@ -65,6 +65,20 @@ app.post('/quote', async (req, res) => {
     });
   } catch (error) {
     console.error('Error generating quote:', error);
+    res.status(500).json({
+      error: 'Internal server error',
+      message: error.message
+    });
+  }
+});
+
+// POST /unwrap endpoint
+app.post('/unwrap', async (req, res) => {
+  try {
+    await ensureConfigInitialized();
+    return await handleUnwrap(req, res);
+  } catch (error) {
+    console.error('Error handling unwrap request:', error);
     res.status(500).json({
       error: 'Internal server error',
       message: error.message
