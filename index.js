@@ -1,7 +1,8 @@
 import express from 'express';
 import cors from 'cors';
 import { handleQuote } from './lib/handlers.js';
-import { getPoolConfigById, loadConfigsOnce, poolsConfig } from './lib/config.js';
+import { getPoolConfigById, loadConfigsOnce, poolsConfig, initializeConfig } from './lib/config.js';
+import { getAllTokens } from './lib/discovery.js';
 import { algodClient, indexerClient } from './lib/clients.js';
 import {
   getPoolInfo as getNomadexPoolInfo
@@ -17,9 +18,19 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
+// Initialize config on startup (for serverless, this will be called on first request)
+let configInitialized = false;
+async function ensureConfigInitialized() {
+  if (!configInitialized) {
+    await initializeConfig();
+    configInitialized = true;
+  }
+}
+
 // POST /quote endpoint
 app.post('/quote', async (req, res) => {
   try {
+    await ensureConfigInitialized();
     const {
       address,
       inputToken,
@@ -64,6 +75,7 @@ app.post('/quote', async (req, res) => {
 // GET /pool/:poolId - Get pool information
 app.get('/pool/:poolId', async (req, res) => {
   try {
+    await ensureConfigInitialized();
     const { poolId } = req.params;
 
     if (!poolId) {
@@ -143,12 +155,24 @@ app.get('/pool/:poolId', async (req, res) => {
 });
 
 // Optional: GET /config/pools - return configured pools for discovery
-app.get('/config/pools', (req, res) => {
+app.get('/config/pools', async (req, res) => {
   try {
+    await ensureConfigInitialized();
     loadConfigsOnce();
     res.json(poolsConfig);
   } catch (e) {
     res.status(500).json({ error: 'Failed to load pools config', message: e.message });
+  }
+});
+
+// Optional: GET /config/tokens - return discovered tokens with metadata
+app.get('/config/tokens', async (req, res) => {
+  try {
+    await ensureConfigInitialized();
+    const tokens = getAllTokens();
+    res.json({ tokens: tokens });
+  } catch (e) {
+    res.status(500).json({ error: 'Failed to load tokens config', message: e.message });
   }
 });
 
@@ -161,10 +185,16 @@ app.get('/health', (req, res) => {
 // When imported as a module (Vercel), export the app instead
 // In ESM, check if we're not in a serverless environment
 if (!process.env.VERCEL) {
-  app.listen(PORT, () => {
-    console.log(`Swap API server running on port ${PORT}`);
-    console.log(`Algod: ${process.env.ALGOD_URL || 'https://mainnet-api.voi.nodely.dev'}`);
-    console.log(`Indexer: ${process.env.INDEXER_URL || 'https://mainnet-idx.voi.nodely.dev'}`);
+  // Initialize config before starting server
+  initializeConfig().then(() => {
+    app.listen(PORT, () => {
+      console.log(`Swap API server running on port ${PORT}`);
+      console.log(`Algod: ${process.env.ALGOD_URL || 'https://mainnet-api.voi.nodely.dev'}`);
+      console.log(`Indexer: ${process.env.INDEXER_URL || 'https://mainnet-idx.voi.nodely.dev'}`);
+    });
+  }).catch((error) => {
+    console.error('Failed to initialize config:', error);
+    process.exit(1);
   });
 }
 
