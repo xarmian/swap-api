@@ -1,5 +1,7 @@
 import express from 'express';
 import cors from 'cors';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { handleQuote, handleUnwrap } from './lib/handlers.js';
 import { getPoolConfigById, loadConfigsOnce, poolsConfig, initializeConfig } from './lib/config.js';
 import { getAllTokens } from './lib/discovery.js';
@@ -11,12 +13,23 @@ import {
   getPoolInfo200 as getHumbleswapPoolInfo200
 } from './lib/humbleswap.js';
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Middleware
 app.use(cors());
 app.use(express.json());
+
+// Serve static files from public directory
+app.use(express.static(path.join(__dirname, 'public')));
+
+// Serve documentation page at root route
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
 
 // Initialize config on startup (for serverless, this will be called on first request)
 let configInitialized = false;
