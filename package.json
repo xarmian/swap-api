@@ -14,12 +14,12 @@
   "type": "module",
   "dependencies": {
     "@supabase/supabase-js": "^2.39.0",
-    "algosdk": "^2.11.0",
-    "arccjs": "^2.11.5",
+    "algosdk": "^3.0.0",
+    "arccjs": "^3.0.0",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^5.1.0",
-    "ulujs": "^0.12.16"
+    "ulujs": "^3.0.0"
   },
   "devDependencies": {
     "axios": "^1.13.2"
