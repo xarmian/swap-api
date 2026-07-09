@@ -1,0 +1,28 @@
+# Keep the build context small and secrets out of the image.
+node_modules
+npm-debug.log*
+.git
+.gitignore
+.github
+
+# Never copy env files into the image (config is injected by docker-compose at runtime).
+.env
+.env.*
+
+# Local tooling / editor / agent scaffolding
+.claude
+.agents
+.pad.toml
+.DS_Store
+*.log
+
+# Not needed at runtime
+tests
+.vercel
+vercel.json
+Dockerfile
+docker-compose.yml
+.dockerignore
+README.md
+DEPLOY.md
+example-usage.md

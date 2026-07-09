@@ -1,0 +1,38 @@
+# swap-api — deployed behind the shared nginx-proxy + acme-companion stack.
+# Deploy / update on the server with:
+#     git pull && docker compose up -d --build
+# See DEPLOY.md for first-time setup.
+
+services:
+  swap-api:
+    build: .
+    image: swap-api:latest
+    container_name: swap-api
+    restart: unless-stopped
+
+    # App config + secrets AND the proxy/TLS routing vars all come from .env
+    # (see .env.example). .env is gitignored and lives only on the server.
+    #   - nginx-proxy reads VIRTUAL_HOST (+ VIRTUAL_PORT below) from the container env
+    #   - acme-companion reads LETSENCRYPT_HOST / LETSENCRYPT_EMAIL
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      # Fixed here (per-deployment hostnames stay in .env): tells nginx-proxy which
+      # internal port to route to.
+      VIRTUAL_PORT: 3000
+
+    # Reachable by nginx-proxy over the shared network only — no host port is published.
+    expose:
+      - "3000"
+
+    networks:
+      - nginx-proxy
+
+# The nginx-proxy + acme-companion stack already owns this network; we attach to it.
+# It must exist before `up` (it does, since that stack is running).
+networks:
+  nginx-proxy:
+    external: true
+    name: nginx-proxy_nginx-proxy
