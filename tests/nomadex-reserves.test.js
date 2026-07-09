@@ -10,10 +10,34 @@ import { getPoolInfo } from '../lib/nomadex.js';
 
 const POOL_ID = 411756; // any valid app id; address is derived from it
 
+// Encode a big-endian uint256 the way Nomadex stores swap_fee / platform_fee:
+// a 32-byte byteslice (type 1), returned as Uint8Array by algosdk 3.x.
+function uint256Bytes(value) {
+  const hex = BigInt(value).toString(16).padStart(64, '0');
+  return new Uint8Array(Buffer.from(hex, 'hex'));
+}
+
+// Live fee global-state entries. The pool holds swap_fee + factory id; the
+// factory holds platform_fee. The mock indexer returns this same array for both
+// the pool and factory lookups, so both reads resolve here. Combined default
+// 1e12 + 1e12 over the 1e14 scale = 200 bps.
+function feeState({
+  swapFee = 1000000000000n,
+  platformFee = 1000000000000n,
+  factoryId = 411751n
+} = {}) {
+  return [
+    { key: new Uint8Array(Buffer.from('swap_fee')), value: { type: 1, bytes: uint256Bytes(swapFee) } },
+    { key: new Uint8Array(Buffer.from('factory')), value: { type: 2, uint: factoryId } },
+    { key: new Uint8Array(Buffer.from('platform_fee')), value: { type: 1, bytes: uint256Bytes(platformFee) } }
+  ];
+}
+
 // Build a mock indexer whose application has the given global-state entries.
 // Mirrors the algosdk 3.x response shape: camelCase `globalState`, keys as
-// Uint8Array, and uint values as BigInt.
-function mockIndexer(globalState = []) {
+// Uint8Array, and uint values as BigInt. Defaults to a valid live fee state so
+// reserve-focused tests reach the reserve logic.
+function mockIndexer(globalState = feeState()) {
   return {
     lookupApplications() {
       return {
@@ -52,6 +76,7 @@ test('native reserve subtracts account min-balance; ASA reserve is the holding',
   assert.equal(info.reserveB, '3429352');
   assert.equal(info.tokA, 0);
   assert.equal(info.tokB, 302190);
+  assert.equal(info.fee, 200); // (1e12 swap_fee + 1e12 platform_fee) / 1e14 = 2%
 });
 
 test('reserves map to the correct side when native is tokB', async () => {
@@ -112,18 +137,44 @@ test('identical token IDs fail explicitly', async () => {
   );
 });
 
-test('fee decodes from uint (type 2) state and ignores byteslice (type 1)', async () => {
-  const algod = mockAlgod({
-    amount: 1000000n,
-    minBalance: 100000n,
-    assets: [{ assetId: 302190n, amount: 42n }]
-  });
-  const globalState = [
-    // fee = 50 stored as uint (type 2), BigInt value per algosdk 3.x
-    { key: new Uint8Array(Buffer.from('fee')), value: { type: 2, uint: 50n } },
-    // a byteslice entry (type 1) must never be read as a number
-    { key: new Uint8Array(Buffer.from('symbol')), value: { type: 1, bytes: new Uint8Array(Buffer.from('UNIT')) } }
-  ];
-  const info = await getPoolInfo(POOL_ID, algod, mockIndexer(globalState), nativeAsaConfig);
-  assert.equal(info.fee, 50);
+const feeAlgod = () => mockAlgod({
+  amount: 1000000n,
+  minBalance: 100000n,
+  assets: [{ assetId: 302190n, amount: 42n }]
+});
+
+test('fee = ceil((swap_fee + platform_fee) * 10000 / 1e14) in basis points', async () => {
+  // 5e11 + 5e11 = 1e12 over 1e14 => exactly 100 bps.
+  const info = await getPoolInfo(
+    POOL_ID, feeAlgod(),
+    mockIndexer(feeState({ swapFee: 500000000000n, platformFee: 500000000000n })),
+    nativeAsaConfig
+  );
+  assert.equal(info.fee, 100);
+});
+
+test('fee conversion rounds UP so the fee is never under-applied', async () => {
+  // 2.003e12 / 1e14 = 200.3 bps -> must ceil to 201, never 200.
+  const info = await getPoolInfo(
+    POOL_ID, feeAlgod(),
+    mockIndexer(feeState({ swapFee: 2003000000000n, platformFee: 0n })),
+    nativeAsaConfig
+  );
+  assert.equal(info.fee, 201);
+});
+
+test('missing swap_fee fails explicitly (no silent default fee)', async () => {
+  const state = feeState().filter(e => Buffer.from(e.key).toString() !== 'swap_fee');
+  await assert.rejects(
+    () => getPoolInfo(POOL_ID, feeAlgod(), mockIndexer(state), nativeAsaConfig),
+    /no readable swap_fee/
+  );
+});
+
+test('missing platform_fee fails explicitly (no silent default fee)', async () => {
+  const state = feeState().filter(e => Buffer.from(e.key).toString() !== 'platform_fee');
+  await assert.rejects(
+    () => getPoolInfo(POOL_ID, feeAlgod(), mockIndexer(state), nativeAsaConfig),
+    /no readable platform_fee/
+  );
 });
