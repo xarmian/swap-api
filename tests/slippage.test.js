@@ -13,6 +13,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { applySlippageToOutput } from '../lib/utils.js';
+import { enforcedMinAmountOut } from '../lib/transactions.js';
 
 test('zero slippage returns the full output unchanged', () => {
   assert.equal(applySlippageToOutput(1_000_000n, 0), 1_000_000n);
@@ -49,27 +50,39 @@ test('slippage >= 100% is clamped so the minimum never goes negative', () => {
   assert.equal(applySlippageToOutput(1_000_000n, 2), 0n);
 });
 
-test('reported == enforced: the reported total equals the enforced minAmountOut sum, with no hidden buffer (TASK-6)', () => {
+test('reported == enforced: the production enforcement boundary passes minOutput through with NO buffer (TASK-6)', () => {
+  // enforcedMinAmountOut (lib/transactions.js) is the SINGLE source of every
+  // swap's on-chain minAmountOut (both DEX call sites route through it). The
+  // response reports the SAME split.minOutput (Σ in lib/handlers.js), so the
+  // user-facing floor must equal the enforced floor. The TASK-6 bug applied a
+  // 0.99 haircut here, dropping the enforced minimum ~1% below what was reported.
+  // This observes the REAL production helper, so reintroducing that haircut in
+  // transactions.js would fail this test (it is not a local re-derivation).
+  const cases = [1_000_000n, 999n, 250_000n, 3n, 0n, 123_456_789n];
+  for (const minOutput of cases) {
+    const reported = minOutput.toString();               // what handlers.js reports
+    const enforced = enforcedMinAmountOut(minOutput);    // what transactions.js enforces
+    assert.equal(enforced, reported, `enforced must equal reported for ${minOutput}`);
+    // A reintroduced 0.99 buffer would produce a strictly smaller value.
+    const buffered = ((minOutput * 99n) / 100n).toString();
+    if (minOutput >= 100n) {
+      assert.notEqual(enforced, buffered, 'enforced minimum must not be quietly buffered down ~1%');
+    }
+  }
+});
+
+test('reported == enforced: aggregate reported total equals the enforced minAmountOut sum (multi-pool split)', () => {
   // Per split, minOutput = applySlippageToOutput(expectedOutput, slippage).
-  // handlers.js reports Σ BigInt(split.minOutput) as minimumOutputAmount
-  // (lib/handlers.js:532/:438); transactions.js enforces minAmountOut =
-  // BigInt(split.minOutput) per swap (lib/transactions.js:1442/:2002). The
-  // TASK-6 bug was a 0.99 buffer applied ONLY to the enforced side, so the user
-  // could receive ~1% below the reported floor. Pin that both aggregates are the
-  // identical unbuffered value, and that neither is the 0.99-haircut variant.
+  // handlers.js reports Σ BigInt(split.minOutput); transactions.js enforces
+  // enforcedMinAmountOut(split.minOutput) per swap. With the real boundary, the
+  // two aggregates must coincide exactly (no per-split haircut).
   const slippage = 0.005;
   const expectedOutputs = [1_000_000n, 250_000n, 3n]; // multi-pool split incl. a tiny leg
   const minOutputs = expectedOutputs.map((o) => applySlippageToOutput(o, slippage));
 
-  const reportedTotal = minOutputs.reduce((s, m) => s + BigInt(m), 0n);      // handlers side
-  const enforcedTotal = minOutputs.reduce((s, m) => s + BigInt(m), 0n);      // transactions side
-  assert.equal(reportedTotal, enforcedTotal);
-
-  // A reintroduced 0.99 buffer on the enforced side would drop it below the
-  // reported floor — assert we are NOT quietly shaving another ~1% off.
-  const buffered = minOutputs.reduce((s, m) => s + (BigInt(m) * 99n) / 100n, 0n);
-  assert.ok(buffered < reportedTotal, 'sanity: a 0.99 buffer would lower the enforced sum');
-  assert.notEqual(enforcedTotal, buffered);
+  const reportedTotal = minOutputs.reduce((s, m) => s + BigInt(m), 0n);
+  const enforcedTotal = minOutputs.reduce((s, m) => s + BigInt(enforcedMinAmountOut(m)), 0n);
+  assert.equal(enforcedTotal, reportedTotal);
 });
 
 test('accepts string and BigInt outputs identically', () => {
