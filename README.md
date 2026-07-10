@@ -116,7 +116,7 @@ Generate a swap quote and unsigned transaction group. The API supports both sing
 - `outputToken` (number, required) - Output token ID (underlying token, not wrapped)
 - `amount` (string, required) - Amount to swap (in base units)
 - `address` (string, optional) - User's Algorand address (required for transaction generation)
-- `slippageTolerance` (number, optional) - Slippage tolerance as decimal (e.g., 0.01 for 1%, default: 0.01)
+- `slippageTolerance` (number, optional) - Slippage tolerance as decimal in the range `[0, 0.5)` (e.g., 0.01 for 1%, default: 0.01). An explicit `0` is honored; values outside the range (negative, `>= 0.5`, NaN, non-number) return HTTP 400.
 - `poolId` (string, optional) - Pool contract ID. If provided, uses single-pool mode. If omitted, automatically discovers and routes across multiple matching pools
 - `dex` (array of strings, optional) - Filter pools by DEX names (e.g., `["humbleswap", "nomadex"]`). Defaults to all configured DEXes
 

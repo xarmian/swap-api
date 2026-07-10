@@ -61,8 +61,20 @@ app.post('/quote', async (req, res) => {
       });
     }
 
-    // Default slippage tolerance to 1% if not provided
-    const slippage = slippageTolerance || 0.01;
+    // Default slippage tolerance to 1% only when omitted; honor an explicit 0.
+    // Any provided value (including null) is validated as a finite number in
+    // [0, 0.5) so a caller cannot sign an unbounded- or negative-loss tx.
+    const slippage = slippageTolerance === undefined ? 0.01 : slippageTolerance;
+    if (
+      typeof slippage !== 'number' ||
+      !Number.isFinite(slippage) ||
+      slippage < 0 ||
+      slippage >= 0.5
+    ) {
+      return res.status(400).json({
+        error: 'Invalid slippageTolerance: must be a finite number in [0, 0.5)'
+      });
+    }
     const inputTokenStr = String(inputToken);
     const outputTokenStr = String(outputToken);
 
