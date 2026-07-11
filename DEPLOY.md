@@ -57,11 +57,20 @@ docker compose exec swap-api node -e "require('http').get('http://127.0.0.1:3000
   `nginx-proxy` network, so nothing bypasses TLS. Check health with `docker compose ps`, or
   probe `/health` from inside the container via `docker compose exec` (above); externally it
   is reachable only through the proxied HTTPS hostname.
-- **Boot latency.** On start the app runs a one-time on-chain pool discovery before it
-  begins serving; the container is marked healthy only after that completes (the
-  `HEALTHCHECK` `start-period` allows ~40s). Unlike the Vercel/serverless deployment, this
-  discovery happens **once per container** rather than per cold start, and the in-memory
-  pool/token cache then persists for the container's lifetime.
+- **Boot latency.** On start the app discovers all configured pools in parallel (bounded
+  concurrency, `DISCOVERY_CONCURRENCY`, default 6) before it begins serving; the container
+  is marked healthy only after that completes (the `HEALTHCHECK` `start-period` allows
+  ~40s). A warm restart (`docker compose restart`, no rebuild) skips discovery entirely if
+  a complete prior snapshot is cached in the container's `/tmp`. Unlike the
+  Vercel/serverless deployment, this discovery happens **once per container** rather than
+  per cold start, and the in-memory pool/token cache then persists for the container's
+  lifetime.
+- **Partial discovery.** If fewer than `DISCOVERY_MIN_SUCCESS_RATIO` (default 70%) of
+  configured pools discover successfully, startup fails loudly (the container never
+  becomes healthy) instead of serving an incomplete pool set. Above that threshold, the
+  missing pools are retried lazily (every `DISCOVERY_RETRY_TTL_MS`, default 2 minutes) on
+  request traffic, and are visible in `GET /health` (`status: "degraded"`) and
+  `GET /config/pools` (`discovery.failedPools`) until they recover.
 - **Secrets.** `.env` is gitignored and never enters the image (`.dockerignore` excludes
   it); config is injected at runtime by docker-compose.
 - **Config source of truth.** Pools are discovered on-chain at boot from
