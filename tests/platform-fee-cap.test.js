@@ -51,7 +51,7 @@ function ammCurve(amountIn) {
   return (R * a) / (K + a);
 }
 
-function mockSplitDeps(t, outFn = twoPoolCurve) {
+function mockSplitDeps(t, outFn = twoPoolCurve, slippageFn = (out) => out) {
   t.mock.module('../lib/utils.js', {
     namedExports: {
       getTokenDecimals: async () => 6,
@@ -61,9 +61,9 @@ function mockSplitDeps(t, outFn = twoPoolCurve) {
       calculateOptimalSplitAmount: () => 0n,
       refineSplitAmount: (total) => total / 2n,
       calculateRate: () => 1,
-      // Identity slippage so minOutput mirrors expectedOutput and we can assert
-      // the fee cap flows into the enforced min-received identically.
-      applySlippageToOutput: (out) => out
+      // Default identity slippage so minOutput mirrors expectedOutput; tests that
+      // need ΣM < feeAmount pass a reducing slippageFn to exercise the ΣM cap.
+      applySlippageToOutput: (out) => slippageFn(BigInt(out))
     }
   });
   t.mock.module('../lib/config.js', {
@@ -100,7 +100,7 @@ function pools(n) {
   }));
 }
 
-async function runSplit(feeBps, feeAddr, poolCount = 2) {
+async function runSplit(feeBps, feeAddr, poolCount = 2, distributeFeePerLeg = false) {
   const { createPoolInfoCache, calculateOptimalSplit } = await importFreshQuotes();
   const prevBps = process.env.PLATFORM_FEE_BPS;
   const prevAddr = process.env.PLATFORM_FEE_ADDR;
@@ -108,7 +108,7 @@ async function runSplit(feeBps, feeAddr, poolCount = 2) {
   if (feeAddr === null) delete process.env.PLATFORM_FEE_ADDR;
   else process.env.PLATFORM_FEE_ADDR = feeAddr;
   try {
-    return await calculateOptimalSplit(pools(poolCount), 1, 2, 1_000_000n, 0.01, '', createPoolInfoCache());
+    return await calculateOptimalSplit(pools(poolCount), 1, 2, 1_000_000n, 0.01, '', createPoolInfoCache(), distributeFeePerLeg);
   } finally {
     if (prevBps === undefined) delete process.env.PLATFORM_FEE_BPS; else process.env.PLATFORM_FEE_BPS = prevBps;
     if (prevAddr === undefined) delete process.env.PLATFORM_FEE_ADDR; else process.env.PLATFORM_FEE_ADDR = prevAddr;
@@ -140,11 +140,19 @@ test('real config (feeBps=5000): cap is a strict no-op; fee = gain*bps/10000 < g
   assert.equal(feeAmount, 50n, 'fee = 100 * 5000 / 10000 = 50');
   assert.ok(feeAmount < gain, 'fee is strictly below gain for feeBps < 10000');
 
-  // Fee-adjusted split still beats the single-pool baseline (600 - 50 = 550).
-  assert.equal(sumExpected(result.splitDetails), 550n, 'split output net of fee');
-  assert.ok(sumExpected(result.splitDetails) >= 500n, 'net split >= single-pool baseline');
-  // Cap flows into the enforced min-received identically (identity slippage).
-  assert.equal(sumMin(result.splitDetails), sumExpected(result.splitDetails), 'min-received tracks expected after fee');
+  // Option C: split legs stay GROSS (no per-leg fee subtraction). The split
+  // gross output is 300+300 = 600, unreduced -- proof there is no per-leg
+  // proportional-flooring dust (dust == 0 by construction).
+  assert.equal(sumExpected(result.splitDetails), 600n, 'split legs are GROSS (no per-leg fee)');
+  // Identity slippage: gross min == gross expected.
+  assert.equal(sumMin(result.splitDetails), sumExpected(result.splitDetails), 'gross min tracks gross expected');
+  // Reported aggregate net/min (what lib/handlers.js reports) subtract the fee
+  // exactly ONCE: reported_net == ΣG_i − F, reported_min == ΣM_i − F.
+  const reportedNet = sumExpected(result.splitDetails) - feeAmount;
+  const reportedMin = sumMin(result.splitDetails) - feeAmount;
+  assert.equal(reportedNet, 550n, 'reported net == ΣG_i − F (600 − 50)');
+  assert.equal(reportedMin, 550n, 'reported min == ΣM_i − F (600 − 50)');
+  assert.ok(reportedNet >= 500n, 'net still >= single-pool baseline');
 });
 
 test('misconfig (feeBps=20000): fee capped at gain; user never pushed below baseline', async (t) => {
@@ -162,11 +170,62 @@ test('misconfig (feeBps=20000): fee capped at gain; user never pushed below base
   assert.equal(feeAmount, gain, 'fee is capped exactly at the realized gain');
   assert.ok(feeAmount < 200n, 'fee is strictly below the uncapped 200');
 
-  // Fee-adjusted split ties the single-pool baseline (600 - 100 = 500) and is
-  // NEVER below it -- the inversion PR #26's guard protected against is gone.
-  assert.equal(sumExpected(result.splitDetails), 500n, 'net split == single-pool baseline (not below)');
-  assert.ok(sumExpected(result.splitDetails) >= 500n, 'net split >= single-pool baseline');
-  assert.equal(sumMin(result.splitDetails), sumExpected(result.splitDetails), 'min-received tracks expected after fee');
+  // Option C: split legs stay GROSS (600); the fee is subtracted once at the
+  // aggregate level. Reported net ties the single-pool baseline (600 − 100 =
+  // 500) and is NEVER below it -- the inversion PR #26's guard protected against.
+  assert.equal(sumExpected(result.splitDetails), 600n, 'split legs are GROSS (no per-leg fee)');
+  assert.equal(sumMin(result.splitDetails), sumExpected(result.splitDetails), 'gross min tracks gross expected');
+  const reportedNet = sumExpected(result.splitDetails) - feeAmount;
+  const reportedMin = sumMin(result.splitDetails) - feeAmount;
+  assert.equal(reportedNet, 500n, 'reported net == ΣG_i − F (600 − 100) == single-pool baseline (not below)');
+  assert.equal(reportedMin, 500n, 'reported min == ΣM_i − F (600 − 100)');
+  assert.ok(reportedNet >= 500n, 'reported net >= single-pool baseline');
+});
+
+test('TASK-54: aggregate fee is also capped at ΣM_i so reported min never goes negative', async (t) => {
+  // Reducing slippage (min = expected/10) makes ΣM_i (=60) < the gain-based fee.
+  // At feeBps=10000 the uncapped/gain-capped fee is 100 > ΣM_i, so the ΣM_i cap
+  // must clamp feeAmount to 60, keeping reported min (ΣM_i − F) at 0, not -40.
+  mockSplitDeps(t, twoPoolCurve, (out) => out / 10n);
+  const result = await runSplit(10000, 'FEEADDR');
+
+  assert.equal(result.splitDetails.length, 2, 'a 2-pool split is selected');
+  const gain = BigInt(result.platformFee.gain);
+  const feeAmount = BigInt(result.platformFee.feeAmount);
+  assert.equal(gain, 100n, 'gain = split(600) - best single(500)');
+
+  // Legs stay GROSS: expected 600, min 60 (= 600/10 via reducing slippage).
+  const grossExpected = sumExpected(result.splitDetails);
+  const grossMin = sumMin(result.splitDetails);
+  assert.equal(grossExpected, 600n, 'legs are GROSS expected');
+  assert.equal(grossMin, 60n, 'legs are GROSS min (reduced slippage)');
+
+  // Fee capped at ΣM_i (60), below the gain-cap (100).
+  assert.equal(feeAmount, grossMin, 'aggregate fee capped at ΣM_i');
+  assert.ok(feeAmount <= gain, 'ΣM_i cap still respects the gain cap');
+
+  // Reported net/min: subtracted once, min never negative.
+  assert.equal(grossExpected - feeAmount, 540n, 'reported net == ΣG_i − F (600 − 60)');
+  assert.equal(grossMin - feeAmount, 0n, 'reported min == ΣM_i − F == 0 (never negative)');
+  assert.ok(grossMin - feeAmount >= 0n, 'reported min is non-negative');
+});
+
+test('TASK-54: multi-hop mode (distributeFeePerLeg=true) preserves legacy per-leg fee reduction', async (t) => {
+  // The multi-hop caller passes distributeFeePerLeg=true so its hop-chaining
+  // stays byte-identical to the pre-Option-C behavior: each leg is reduced by
+  // its proportional share of the fee (legs are NOT gross). This locks in that
+  // Option C is scoped to direct routes and does not alter multi-hop amounts.
+  mockSplitDeps(t);
+  const result = await runSplit(5000, 'FEEADDR', 2, /* distributeFeePerLeg */ true);
+
+  assert.equal(result.splitDetails.length, 2, 'a 2-pool split is selected');
+  const feeAmount = BigInt(result.platformFee.feeAmount);
+  assert.equal(feeAmount, 50n, 'fee = 100 * 5000 / 10000 = 50 (unchanged)');
+
+  // Legs are fee-REDUCED (300 - 25 each = 275; sum 550), NOT gross 600. This is
+  // the exact pre-Option-C leg accounting the multi-hop path depends on.
+  assert.equal(sumExpected(result.splitDetails), 550n, 'multi-hop legs stay fee-reduced (net), not gross');
+  assert.equal(sumMin(result.splitDetails), 550n, 'multi-hop min legs stay fee-reduced (identity slippage)');
 });
 
 test('invariant: feeAmount never exceeds gain across a sweep of feeBps', async (t) => {
@@ -176,8 +235,10 @@ test('invariant: feeAmount never exceeds gain across a sweep of feeBps', async (
     const gain = BigInt(result.platformFee.gain);
     const feeAmount = BigInt(result.platformFee.feeAmount);
     assert.ok(feeAmount <= gain, `feeAmount (${feeAmount}) must not exceed gain (${gain}) at feeBps=${feeBps}`);
-    // Net split output is always >= the single-pool baseline (500).
-    assert.ok(sumExpected(result.splitDetails) >= 500n, `net split >= baseline at feeBps=${feeBps}`);
+    // Option C: legs are GROSS (no per-leg fee flooring -> dust == 0).
+    assert.equal(sumExpected(result.splitDetails), 600n, `split legs are GROSS at feeBps=${feeBps}`);
+    // Reported net (ΣG_i − F) is always >= the single-pool baseline (500).
+    assert.ok(sumExpected(result.splitDetails) - feeAmount >= 500n, `reported net >= baseline at feeBps=${feeBps}`);
   }
 });
 
@@ -201,8 +262,12 @@ test('3+-pool path: fee also capped at gain (both fee sites covered)', async (t)
     } else {
       assert.equal(feeAmount, (gain * BigInt(feeBps)) / 10000n, `3+-pool cap is a no-op at feeBps=${feeBps}`);
     }
-    // Net split output never pushed below the single-pool baseline.
-    assert.ok(sumExpected(result.splitDetails) >= baseline, `net split >= baseline at feeBps=${feeBps}`);
-    assert.equal(sumMin(result.splitDetails), sumExpected(result.splitDetails), `min tracks expected at feeBps=${feeBps}`);
+    // Option C: legs are GROSS. The aggregate gross output equals gain + baseline
+    // (no per-leg fee flooring -> dust == 0), and reported net (ΣG_i − F) is
+    // never pushed below the single-pool baseline.
+    const grossExpected = sumExpected(result.splitDetails);
+    assert.equal(grossExpected, gain + baseline, `gross split == gain + baseline (no dust) at feeBps=${feeBps}`);
+    assert.equal(sumMin(result.splitDetails), grossExpected, `gross min tracks gross expected at feeBps=${feeBps}`);
+    assert.ok(grossExpected - feeAmount >= baseline, `reported net >= baseline at feeBps=${feeBps}`);
   }
 });
