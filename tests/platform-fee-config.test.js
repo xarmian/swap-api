@@ -257,3 +257,11 @@ test('zero fee + malformed address is still fine (no fee charged, addr ignored)'
     assert.equal(getPlatformFeeConfig().feeAddress, 'FEEADDR');
   });
 });
+
+test('unset fee + malformed address is still fine (no fee charged, addr ignored)', () => {
+  withFeeConfig(undefined, 'FEEADDR', () => {
+    assert.doesNotThrow(() => getPlatformFeeConfig());
+    assert.equal(getPlatformFeeConfig().feeBps, 0);
+    assert.equal(getPlatformFeeConfig().feeAddress, 'FEEADDR');
+  });
+});
