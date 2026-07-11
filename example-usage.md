@@ -48,8 +48,8 @@ curl -X POST http://localhost:3000/quote \
   -H "Content-Type: application/json" \
   -d '{
     "address": "4LI2Z52C3WKIPFTVMCUJ5LSYU4KLUA6JNMQAQQRI6RAVIMZWAPI52F5YKY",
-    "inputToken": 302190,
-    "outputToken": 0,
+    "inputToken": "302190",
+    "outputToken": "0",
     "amount": "100000",
     "slippageTolerance": 0.01,
     "poolId": "401594"
@@ -86,8 +86,8 @@ curl -X POST http://localhost:3000/unwrap \
   -d '{
     "address": "4LI2Z52C3WKIPFTVMCUJ5LSYU4KLUA6JNMQAQQRI6RAVIMZWAPI52F5YKY",
     "items": [
-      { "wrappedTokenId": 390001, "amount": "1000000" },
-      { "wrappedTokenId": 395614, "amount": "500000" }
+      { "wrappedTokenId": "390001", "amount": "1000000" },
+      { "wrappedTokenId": "395614", "amount": "500000" }
     ]
   }'
 ```

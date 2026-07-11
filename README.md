@@ -72,8 +72,8 @@ Generate a swap quote and unsigned transaction group. The API supports both sing
 ```json
 {
   "address": "4LI2Z52C3WKIPFTVMCUJ5LSYU4KLUA6JNMQAQQRI6RAVIMZWAPI52F5YKY",
-  "inputToken": 395614,
-  "outputToken": 390001,
+  "inputToken": "395614",
+  "outputToken": "390001",
   "amount": "100000",
   "slippageTolerance": 0.01,
   "poolId": "395553",
@@ -83,8 +83,8 @@ Generate a swap quote and unsigned transaction group. The API supports both sing
 
 **Request Parameters:**
 
-- `inputToken` (number, required) - Input token ID (underlying token, not wrapped)
-- `outputToken` (number, required) - Output token ID (underlying token, not wrapped)
+- `inputToken` (string, required) - Input token ID (underlying token, not wrapped), as a string of digits (e.g. `"395614"`)
+- `outputToken` (string, required) - Output token ID (underlying token, not wrapped), as a string of digits
 - `amount` (string, required) - Amount to swap (in base units)
 - `address` (string, optional) - User's Algorand address (required for transaction generation)
 - `slippageTolerance` (number, optional) - Slippage tolerance as decimal in the range `[0, 0.5)` (e.g., 0.01 for 1%, default: 0.01). An explicit `0` is honored; values outside the range (negative, `>= 0.5`, NaN, non-number) return HTTP 400.

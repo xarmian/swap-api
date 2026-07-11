@@ -52,34 +52,20 @@ async function ensureConfigInitialized() {
 // and app ids are currently in the tens of millions). Instead, reject any
 // out-of-range id here, before it ever reaches a Number() call (CONVE-35:
 // reject, never coerce/clamp to a plausible-but-wrong id).
+//
+// Only STRING ids are accepted (like `amount` above, and like poolId's
+// existing URL-param contract) — deliberately NOT a bare JSON `number`.
+// express.json() runs JSON.parse on the request body before this function
+// ever sees a value: a numeric wire literal has already been rounded to the
+// nearest IEEE-754 double by then, so a malformed/fractional id right at the
+// Number.MAX_SAFE_INTEGER boundary (e.g. wire text `9007199254740991.1`)
+// would silently arrive here already collapsed into a clean-looking integer,
+// with no way to tell it was malformed. Requiring a digit STRING sidesteps
+// that class of precision loss entirely, exactly as the amount validation
+// above already does for the identical reason.
 function isValidAssetId(value) {
-  if (typeof value === 'number') {
-    // A JSON number literal is already rounded to the nearest IEEE-754
-    // double by express.json()'s JSON.parse before this function ever runs,
-    // so a non-integer id (e.g. a client bug sending 12345.6) must be
-    // rejected explicitly here — by the time it's a JS number, a fractional
-    // value close enough to a large integer may otherwise look identical to
-    // one (CONVE-35: reject, don't coerce). This does NOT reopen the
-    // wrong-asset-routing hole a string-typed id closes: IEEE-754's
-    // representable grid transitions from ULP=1 to ULP=2 exactly AT
-    // Number.MAX_SAFE_INTEGER + 1, so any wire value strictly greater than
-    // Number.MAX_SAFE_INTEGER rounds to itself or higher — never down into a
-    // different, smaller, in-range integer. The only rounding "loss" possible
-    // is a fractional value within 0.5 of the boundary collapsing to exactly
-    // Number.MAX_SAFE_INTEGER itself (still a valid, in-range id, not a
-    // different wrong one) — verified in tests/id-validation.test.js.
-    if (!Number.isInteger(value)) return false;
-    // Requiring ids to be digit STRINGS (as `amount` does above, for the
-    // identical reason) would close this residual edge case completely, but
-    // inputToken/outputToken are a documented `number` field in the public
-    // API (README.md) with real callers sending JSON numbers today — making
-    // that a breaking wire-format change, which is out of scope for this
-    // boundary-validation fix (TASK-45 explicitly rejected a larger
-    // migration). poolId is already string-only per the README/route param.
-  } else if (typeof value !== 'string') {
-    return false;
-  }
-  const str = String(value).trim();
+  if (typeof value !== 'string') return false;
+  const str = value.trim();
   // Digits only (no sign, no decimal point, no exponent) so a negative,
   // fractional, or scientific-notation value is rejected outright rather
   // than coerced.
@@ -113,17 +99,17 @@ app.post('/quote', async (req, res) => {
       }, getDiscoveryStatus()));
     }
 
-    // Validate inputToken/outputToken/poolId are non-negative integers within
+    // Validate inputToken/outputToken/poolId are digit-string ids within
     // Number.MAX_SAFE_INTEGER before anything downstream calls Number() on
     // them (TASK-45, CONVE-35 — see isValidAssetId doc comment above).
     if (!isValidAssetId(inputToken) || !isValidAssetId(outputToken)) {
       return res.status(400).json(withDiscoveryWarning({
-        error: `Invalid inputToken/outputToken: must be a non-negative integer <= ${Number.MAX_SAFE_INTEGER}`
+        error: `Invalid inputToken/outputToken: must be a string of digits (asset/app id) <= ${Number.MAX_SAFE_INTEGER}`
       }, getDiscoveryStatus()));
     }
     if (poolId !== undefined && poolId !== null && !isValidAssetId(poolId)) {
       return res.status(400).json(withDiscoveryWarning({
-        error: `Invalid poolId: must be a non-negative integer <= ${Number.MAX_SAFE_INTEGER}`
+        error: `Invalid poolId: must be a string of digits (asset/app id) <= ${Number.MAX_SAFE_INTEGER}`
       }, getDiscoveryStatus()));
     }
 
@@ -198,19 +184,23 @@ app.post('/quote', async (req, res) => {
 // POST /unwrap endpoint
 app.post('/unwrap', async (req, res) => {
   try {
-    // Validate each item's wrappedTokenId before ensureConfigInitialized() so
-    // an out-of-range id fails fast without network I/O (TASK-45). Presence/
-    // shape of `address`/`items` themselves is still validated by
-    // handleUnwrap — this only guards the id range once an items array with
-    // wrappedTokenId fields is present.
+    // Validate every item's wrappedTokenId before ensureConfigInitialized()
+    // so an out-of-range/missing id fails fast without network I/O (TASK-45).
+    // Presence is required here (not just format-when-present): downstream,
+    // buildBatchUnwrapTransactions (lib/transactions.js) throws a generic
+    // "Each item must include wrappedTokenId and amount" Error for a missing
+    // id, whose message doesn't match handleUnwrap's isClientError substring
+    // list — so without this check a missing wrappedTokenId would 500
+    // instead of 400 (adjacent defect, folded in per CONVE-32). Full item
+    // shape/`amount` validation otherwise stays with handleUnwrap, unchanged.
     const { items } = req.body || {};
     if (Array.isArray(items)) {
-      const badItem = items.find(
-        (item) => item && item.wrappedTokenId !== undefined && !isValidAssetId(item.wrappedTokenId)
+      const badItemIndex = items.findIndex(
+        (item) => !item || !isValidAssetId(item.wrappedTokenId)
       );
-      if (badItem) {
+      if (badItemIndex !== -1) {
         return res.status(400).json({
-          error: `Invalid wrappedTokenId: must be a non-negative integer <= ${Number.MAX_SAFE_INTEGER}`
+          error: `Invalid items[${badItemIndex}].wrappedTokenId: required, must be a string of digits (asset id) <= ${Number.MAX_SAFE_INTEGER}`
         });
       }
     }
@@ -238,7 +228,7 @@ app.get('/pool/:poolId', async (req, res) => {
     // fast without network I/O (TASK-45; matches the /quote id/amount checks).
     if (!isValidAssetId(poolId)) {
       return res.status(400).json({
-        error: `Invalid poolId: must be a non-negative integer <= ${Number.MAX_SAFE_INTEGER}`
+        error: `Invalid poolId: must be a string of digits (asset/app id) <= ${Number.MAX_SAFE_INTEGER}`
       });
     }
 

@@ -10,8 +10,8 @@ async function testRouterWithoutPoolId() {
 
     const requestBody = {
       address: 'BUD2763FMK6EYVKGHWWUN4QKHPSPCVFUEPPI4PQCPGYVPGQ6GNKBX6IXCQ',
-      inputToken: 302190,  // USDC ASA (underlying token)
-      outputToken: 0,       // Native VOI
+      inputToken: '302190',  // USDC ASA (underlying token)
+      outputToken: '0',       // Native VOI
       amount: '5000000',  // 100 USDC (6 decimals)
       slippageTolerance: 0.01
       // No poolId - should discover pools automatically
@@ -68,8 +68,8 @@ async function testRouterWithDexFilter() {
 
     const requestBody = {
       address: 'BUD2763FMK6EYVKGHWWUN4QKHPSPCVFUEPPI4PQCPGYVPGQ6GNKBX6IXCQ',
-      inputToken: 302190,  // USDC ASA
-      outputToken: 0,       // Native VOI
+      inputToken: '302190',  // USDC ASA
+      outputToken: '0',       // Native VOI
       amount: '100000000',  // 100 USDC
       slippageTolerance: 0.01,
       dex: ['nomadex']     // Only use Nomadex pools
@@ -121,8 +121,8 @@ async function testRouterWithHumbleSwapFilter() {
 
     const requestBody = {
       address: 'BUD2763FMK6EYVKGHWWUN4QKHPSPCVFUEPPI4PQCPGYVPGQ6GNKBX6IXCQ',
-      inputToken: 302190,  // USDC ASA
-      outputToken: 0,       // Native VOI
+      inputToken: '302190',  // USDC ASA
+      outputToken: '0',       // Native VOI
       amount: '100000000',  // 100 USDC
       slippageTolerance: 0.01,
       dex: ['humbleswap']  // Only use HumbleSwap pools

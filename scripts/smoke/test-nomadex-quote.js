@@ -9,8 +9,8 @@ async function testNomadexQuote() {
 
     const requestBody = {
       address: '4LI2Z52C3WKIPFTVMCUJ5LSYU4KLUA6JNMQAQQRI6RAVIMZWAPI52F5YKY',
-      inputToken: 0,      // Native VOI
-      outputToken: 302190, // USDC ASA
+      inputToken: '0',      // Native VOI
+      outputToken: '302190', // USDC ASA
       amount: '1000000',   // 1 VOI (6 decimals)
       slippageTolerance: 0.01,
       poolId: '411756'     // Nomadex USDC/VOI pool
@@ -85,8 +85,8 @@ async function testNomadexReverseSwap() {
 
     const requestBody = {
       address: '4LI2Z52C3WKIPFTVMCUJ5LSYU4KLUA6JNMQAQQRI6RAVIMZWAPI52F5YKY',
-      inputToken: 302190, // USDC ASA
-      outputToken: 0,     // Native VOI
+      inputToken: '302190', // USDC ASA
+      outputToken: '0',     // Native VOI
       amount: '100000',   // 0.1 USDC (6 decimals)
       slippageTolerance: 0.01,
       poolId: '411756'    // Nomadex USDC/VOI pool
