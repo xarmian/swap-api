@@ -7,7 +7,7 @@
 // import time, so the suite stays hermetic.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { resolveFee, generateSplitRatios, allocateAmounts } from '../lib/quotes.js';
+import { resolveFee, generateSplitRatios, allocateAmounts, skipReconcileKey, mergeSkippedPools } from '../lib/quotes.js';
 
 // --- resolveFee ------------------------------------------------------------
 
@@ -104,4 +104,45 @@ test('allocateAmounts: remainder lands in the last positive-ratio slot (no dust 
 test('allocateAmounts: 100%-to-one-pool leaves the others at exactly 0n', () => {
   assert.deepEqual(allocateAmounts(500n, [1, 0]), [500n, 0n]);
   assert.deepEqual(allocateAmounts(3n, [0, 1]), [0n, 3n]);
+});
+
+// --- skipReconcileKey / mergeSkippedPools ----------------------------------
+// (dex, poolId) reconciliation: matches the pool cache-key discipline (PR #23)
+// so skip/success bookkeeping never collides two pools by numeric poolId alone.
+
+test('skipReconcileKey: composes ${dex}:${poolId} and defaults dex to humbleswap', () => {
+  assert.equal(skipReconcileKey({ poolId: 123, dex: 'nomadex' }), 'nomadex:123');
+  assert.equal(skipReconcileKey({ poolId: '123', dex: 'humbleswap' }), 'humbleswap:123');
+  // Missing dex defaults to 'humbleswap' (the PR #23 default) so an implicit-dex
+  // config still matches an explicit humbleswap entry for the same poolId.
+  assert.equal(skipReconcileKey({ poolId: 123 }), 'humbleswap:123');
+  assert.equal(skipReconcileKey({ poolId: 123, dex: undefined }), 'humbleswap:123');
+});
+
+test('mergeSkippedPools: two entries with the same poolId but different dex do NOT collide', () => {
+  const merged = mergeSkippedPools(
+    [{ poolId: '123', dex: 'humbleswap', reason: 'error' }],
+    [{ poolId: '123', dex: 'nomadex', reason: 'timeout' }]
+  );
+  assert.equal(merged.length, 2);
+  assert.deepEqual(merged, [
+    { poolId: '123', dex: 'humbleswap', reason: 'error' },
+    { poolId: '123', dex: 'nomadex', reason: 'timeout' }
+  ]);
+});
+
+test('mergeSkippedPools: same (dex, poolId) is deduped, first occurrence wins', () => {
+  const merged = mergeSkippedPools(
+    [{ poolId: '123', dex: 'nomadex', reason: 'error' }],
+    [{ poolId: '123', dex: 'nomadex', reason: 'timeout' }]
+  );
+  assert.deepEqual(merged, [{ poolId: '123', dex: 'nomadex', reason: 'error' }]);
+});
+
+test('mergeSkippedPools: implicit-dex entry dedupes against an explicit humbleswap entry', () => {
+  const merged = mergeSkippedPools(
+    [{ poolId: '123', reason: 'error' }],
+    [{ poolId: '123', dex: 'humbleswap', reason: 'timeout' }]
+  );
+  assert.deepEqual(merged, [{ poolId: '123', reason: 'error' }]);
 });
