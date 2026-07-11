@@ -43,7 +43,6 @@ async function ensureConfigInitialized() {
 // POST /quote endpoint
 app.post('/quote', async (req, res) => {
   try {
-    await ensureConfigInitialized();
     const {
       address,
       inputToken,
@@ -58,6 +57,28 @@ app.post('/quote', async (req, res) => {
     if (inputToken === undefined || outputToken === undefined || !amount) {
       return res.status(400).json({
         error: 'Missing required fields: inputToken, outputToken, amount'
+      });
+    }
+
+    // Validate amount is a well-formed positive integer STRING in base units,
+    // matching the documented API contract (README: `amount` is a string),
+    // before it reaches BigInt() deep in the quote engine. A malformed value
+    // ("abc", "1.5", "-5", scientific notation) previously threw a raw BigInt
+    // SyntaxError there, which surfaced as a 500 and got logged to Supabase as
+    // a server error. Requiring a string (rather than accepting a JSON number)
+    // also rules out silent precision loss: a JS/JSON number above 2^53 is
+    // already rounded before this code runs, so a plausible-but-wrong number
+    // could otherwise sail through validation (CONVE-35 — never coerce
+    // ambiguous money input into a value that only looks valid).
+    if (typeof amount !== 'string') {
+      return res.status(400).json({
+        error: 'Invalid amount: must be a string of digits (base units), e.g. "1000000"'
+      });
+    }
+    const amountStr = amount.trim();
+    if (!/^[0-9]+$/.test(amountStr) || BigInt(amountStr) <= 0n) {
+      return res.status(400).json({
+        error: 'Invalid amount: must be a positive integer expressed in base units'
       });
     }
 
@@ -78,11 +99,15 @@ app.post('/quote', async (req, res) => {
     const inputTokenStr = String(inputToken);
     const outputTokenStr = String(outputToken);
 
+    // All request validation above is pure/synchronous (no I/O), so a
+    // malformed request 400s without depending on config initialization.
+    await ensureConfigInitialized();
+
     // Use unified handler for both single-pool and multi-pool scenarios
     return await handleQuote(req, res, {
       inputToken: inputTokenStr,
       outputToken: outputTokenStr,
-      amount,
+      amount: amountStr,
       slippage,
       address,
       poolId,
@@ -218,6 +243,27 @@ app.get('/config/tokens', async (req, res) => {
 // Health check endpoint
 app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
+});
+
+// Global JSON error handler. Must be registered after all routes/middleware
+// (Express only recognizes a 4-arg function as error-handling middleware).
+// Without this, a malformed JSON request body makes express.json() call
+// next(err) with a body-parser SyntaxError that Express's default handler
+// turns into an HTML error page — wrong content type for a JSON API. Catch
+// that case explicitly and fall back to a generic JSON error for anything
+// else so no route ever leaks HTML to a client expecting JSON.
+app.use((err, req, res, next) => {
+  if (err && err.type === 'entity.parse.failed') {
+    return res.status(400).json({ error: 'Malformed JSON request body' });
+  }
+  if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
+    return res.status(400).json({ error: 'Malformed JSON request body' });
+  }
+  console.error('Unhandled error:', err);
+  res.status(err.status || err.statusCode || 500).json({
+    error: 'Internal server error',
+    message: err.message
+  });
 });
 
 // Start server only when running directly (local development)
