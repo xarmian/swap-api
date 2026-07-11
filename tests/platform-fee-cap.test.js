@@ -51,7 +51,7 @@ function ammCurve(amountIn) {
   return (R * a) / (K + a);
 }
 
-function mockSplitDeps(t, outFn = twoPoolCurve) {
+function mockSplitDeps(t, outFn = twoPoolCurve, slippageFn = (out) => out) {
   t.mock.module('../lib/utils.js', {
     namedExports: {
       getTokenDecimals: async () => 6,
@@ -61,9 +61,9 @@ function mockSplitDeps(t, outFn = twoPoolCurve) {
       calculateOptimalSplitAmount: () => 0n,
       refineSplitAmount: (total) => total / 2n,
       calculateRate: () => 1,
-      // Identity slippage so minOutput mirrors expectedOutput and we can assert
-      // the fee cap flows into the enforced min-received identically.
-      applySlippageToOutput: (out) => out
+      // Default identity slippage so minOutput mirrors expectedOutput; tests that
+      // need ΣM < feeAmount pass a reducing slippageFn to exercise the ΣM cap.
+      applySlippageToOutput: (out) => slippageFn(BigInt(out))
     }
   });
   t.mock.module('../lib/config.js', {
@@ -180,6 +180,34 @@ test('misconfig (feeBps=20000): fee capped at gain; user never pushed below base
   assert.equal(reportedNet, 500n, 'reported net == ΣG_i − F (600 − 100) == single-pool baseline (not below)');
   assert.equal(reportedMin, 500n, 'reported min == ΣM_i − F (600 − 100)');
   assert.ok(reportedNet >= 500n, 'reported net >= single-pool baseline');
+});
+
+test('TASK-54: aggregate fee is also capped at ΣM_i so reported min never goes negative', async (t) => {
+  // Reducing slippage (min = expected/10) makes ΣM_i (=60) < the gain-based fee.
+  // At feeBps=10000 the uncapped/gain-capped fee is 100 > ΣM_i, so the ΣM_i cap
+  // must clamp feeAmount to 60, keeping reported min (ΣM_i − F) at 0, not -40.
+  mockSplitDeps(t, twoPoolCurve, (out) => out / 10n);
+  const result = await runSplit(10000, 'FEEADDR');
+
+  assert.equal(result.splitDetails.length, 2, 'a 2-pool split is selected');
+  const gain = BigInt(result.platformFee.gain);
+  const feeAmount = BigInt(result.platformFee.feeAmount);
+  assert.equal(gain, 100n, 'gain = split(600) - best single(500)');
+
+  // Legs stay GROSS: expected 600, min 60 (= 600/10 via reducing slippage).
+  const grossExpected = sumExpected(result.splitDetails);
+  const grossMin = sumMin(result.splitDetails);
+  assert.equal(grossExpected, 600n, 'legs are GROSS expected');
+  assert.equal(grossMin, 60n, 'legs are GROSS min (reduced slippage)');
+
+  // Fee capped at ΣM_i (60), below the gain-cap (100).
+  assert.equal(feeAmount, grossMin, 'aggregate fee capped at ΣM_i');
+  assert.ok(feeAmount <= gain, 'ΣM_i cap still respects the gain cap');
+
+  // Reported net/min: subtracted once, min never negative.
+  assert.equal(grossExpected - feeAmount, 540n, 'reported net == ΣG_i − F (600 − 60)');
+  assert.equal(grossMin - feeAmount, 0n, 'reported min == ΣM_i − F == 0 (never negative)');
+  assert.ok(grossMin - feeAmount >= 0n, 'reported min is non-negative');
 });
 
 test('TASK-54: multi-hop mode (distributeFeePerLeg=true) preserves legacy per-leg fee reduction', async (t) => {
