@@ -40,6 +40,56 @@ async function ensureConfigInitialized() {
   await initializeConfig();
 }
 
+// Upper bound enforced on every asset/app id (inputToken, outputToken,
+// poolId, wrappedTokenId) accepted at the API boundary. Internally, ids are
+// converted via Number() throughout lib/ (lib/quotes.js, lib/humbleswap.js,
+// lib/nomadex.js, lib/discovery.js, lib/utils.js decimals cache key,
+// lib/config.js wrapped-token cache, etc. — TASK-45). A numeric id above
+// Number.MAX_SAFE_INTEGER (2^53-1) would silently round to a DIFFERENT
+// integer there, which could route/quote the wrong asset. Migrating that
+// internal handling to BigInt/string end-to-end was evaluated and rejected
+// (too large/risky a change for no realistic benefit — Algorand/Voi asset
+// and app ids are currently in the tens of millions). Instead, reject any
+// out-of-range id here, before it ever reaches a Number() call (CONVE-35:
+// reject, never coerce/clamp to a plausible-but-wrong id).
+function isValidAssetId(value) {
+  if (typeof value === 'number') {
+    // A JSON number literal is already rounded to the nearest IEEE-754
+    // double by express.json()'s JSON.parse before this function ever runs,
+    // so a non-integer id (e.g. a client bug sending 12345.6) must be
+    // rejected explicitly here — by the time it's a JS number, a fractional
+    // value close enough to a large integer may otherwise look identical to
+    // one (CONVE-35: reject, don't coerce). This does NOT reopen the
+    // wrong-asset-routing hole a string-typed id closes: IEEE-754's
+    // representable grid transitions from ULP=1 to ULP=2 exactly AT
+    // Number.MAX_SAFE_INTEGER + 1, so any wire value strictly greater than
+    // Number.MAX_SAFE_INTEGER rounds to itself or higher — never down into a
+    // different, smaller, in-range integer. The only rounding "loss" possible
+    // is a fractional value within 0.5 of the boundary collapsing to exactly
+    // Number.MAX_SAFE_INTEGER itself (still a valid, in-range id, not a
+    // different wrong one) — verified in tests/id-validation.test.js.
+    if (!Number.isInteger(value)) return false;
+    // Requiring ids to be digit STRINGS (as `amount` does above, for the
+    // identical reason) would close this residual edge case completely, but
+    // inputToken/outputToken are a documented `number` field in the public
+    // API (README.md) with real callers sending JSON numbers today — making
+    // that a breaking wire-format change, which is out of scope for this
+    // boundary-validation fix (TASK-45 explicitly rejected a larger
+    // migration). poolId is already string-only per the README/route param.
+  } else if (typeof value !== 'string') {
+    return false;
+  }
+  const str = String(value).trim();
+  // Digits only (no sign, no decimal point, no exponent) so a negative,
+  // fractional, or scientific-notation value is rejected outright rather
+  // than coerced.
+  if (!/^[0-9]+$/.test(str)) return false;
+  // Compare in BigInt, not Number: `Number(str) <= Number.MAX_SAFE_INTEGER`
+  // would first round a huge numeric string, which is exactly the precision
+  // loss this check exists to catch.
+  return BigInt(str) <= BigInt(Number.MAX_SAFE_INTEGER);
+}
+
 // POST /quote endpoint
 app.post('/quote', async (req, res) => {
   try {
@@ -60,6 +110,20 @@ app.post('/quote', async (req, res) => {
     if (inputToken === undefined || outputToken === undefined || !amount) {
       return res.status(400).json(withDiscoveryWarning({
         error: 'Missing required fields: inputToken, outputToken, amount'
+      }, getDiscoveryStatus()));
+    }
+
+    // Validate inputToken/outputToken/poolId are non-negative integers within
+    // Number.MAX_SAFE_INTEGER before anything downstream calls Number() on
+    // them (TASK-45, CONVE-35 — see isValidAssetId doc comment above).
+    if (!isValidAssetId(inputToken) || !isValidAssetId(outputToken)) {
+      return res.status(400).json(withDiscoveryWarning({
+        error: `Invalid inputToken/outputToken: must be a non-negative integer <= ${Number.MAX_SAFE_INTEGER}`
+      }, getDiscoveryStatus()));
+    }
+    if (poolId !== undefined && poolId !== null && !isValidAssetId(poolId)) {
+      return res.status(400).json(withDiscoveryWarning({
+        error: `Invalid poolId: must be a non-negative integer <= ${Number.MAX_SAFE_INTEGER}`
       }, getDiscoveryStatus()));
     }
 
@@ -134,6 +198,23 @@ app.post('/quote', async (req, res) => {
 // POST /unwrap endpoint
 app.post('/unwrap', async (req, res) => {
   try {
+    // Validate each item's wrappedTokenId before ensureConfigInitialized() so
+    // an out-of-range id fails fast without network I/O (TASK-45). Presence/
+    // shape of `address`/`items` themselves is still validated by
+    // handleUnwrap — this only guards the id range once an items array with
+    // wrappedTokenId fields is present.
+    const { items } = req.body || {};
+    if (Array.isArray(items)) {
+      const badItem = items.find(
+        (item) => item && item.wrappedTokenId !== undefined && !isValidAssetId(item.wrappedTokenId)
+      );
+      if (badItem) {
+        return res.status(400).json({
+          error: `Invalid wrappedTokenId: must be a non-negative integer <= ${Number.MAX_SAFE_INTEGER}`
+        });
+      }
+    }
+
     await ensureConfigInitialized();
     return await handleUnwrap(req, res);
   } catch (error) {
@@ -148,12 +229,20 @@ app.post('/unwrap', async (req, res) => {
 // GET /pool/:poolId - Get pool information
 app.get('/pool/:poolId', async (req, res) => {
   try {
-    await ensureConfigInitialized();
     const { poolId } = req.params;
 
     if (!poolId) {
       return res.status(400).json({ error: 'Pool ID is required' });
     }
+    // Validated before ensureConfigInitialized() so an out-of-range id fails
+    // fast without network I/O (TASK-45; matches the /quote id/amount checks).
+    if (!isValidAssetId(poolId)) {
+      return res.status(400).json({
+        error: `Invalid poolId: must be a non-negative integer <= ${Number.MAX_SAFE_INTEGER}`
+      });
+    }
+
+    await ensureConfigInitialized();
 
     // Get pool config to determine DEX type
     const poolCfg = getPoolConfigById(poolId);
@@ -302,6 +391,9 @@ if (!process.env.VERCEL) {
     process.exit(1);
   });
 }
+
+// Named export for unit testing (TASK-45); default export below is unchanged.
+export { isValidAssetId };
 
 // Export app for Vercel serverless function
 export default app;
