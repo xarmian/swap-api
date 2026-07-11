@@ -90,8 +90,7 @@ test('direct match: only hops>1 routes reach findOptimalMultiHopRoute; 1-hop dup
         // the strict-greater comparison -- selection must stay on the direct route.
         return { quote: { outputAmount: '400', minimumOutputAmount: '400', priceImpact: 0, hopQuotes: [], skippedPools: [] } };
       },
-      createPoolInfoCache: () => ({ get: async () => null, peek: () => null }),
-      getPlatformFeeConfig: () => ({ feeBps: 0, feeAddress: null })
+      createPoolInfoCache: () => ({ get: async () => null, peek: () => null })
     }
   });
 
@@ -134,8 +133,7 @@ test('direct match with only 1-hop routes: findOptimalMultiHopRoute is never cal
     namedExports: {
       calculateOptimalSplit: async () => directSplitResult(111, 500),
       findOptimalMultiHopRoute: async () => { findOptimalCallCount += 1; return null; },
-      createPoolInfoCache: () => ({ get: async () => null, peek: () => null }),
-      getPlatformFeeConfig: () => ({ feeBps: 0, feeAddress: null })
+      createPoolInfoCache: () => ({ get: async () => null, peek: () => null })
     }
   });
 
@@ -163,29 +161,25 @@ test('direct match with only 1-hop routes: findOptimalMultiHopRoute is never cal
   assert.equal(res.body.poolId, '111');
 });
 
-test('broken platform fee (BPS > 10000): 1-hop routes are NOT pruned (behavior preserved)', async (t) => {
-  // Under a misconfigured platform fee that exceeds 100% of the optimization
-  // gain, calculateOptimalSplit's fee-adjusted split can fall BELOW the best
-  // single pool's raw quote, so a fee-free 1-hop concrete single-pool route
-  // could legitimately beat the direct split. handleQuote must therefore NOT
-  // prune the 1-hop routes here -- it must fall back to evaluating every route
-  // exactly as before this change, so selection/amounts are unchanged in this
-  // (pathological) configuration too.
-  const findOptimalCalls = [];
+test('broken platform fee (BPS > 10000): 1-hop routes are STILL pruned (fee now capped at gain)', async (t) => {
+  // TASK-51: calculateOptimalSplit now caps the platform fee at the realized
+  // gain, so even under a misconfigured PLATFORM_FEE_BPS > 10000 the fee-adjusted
+  // split can never fall below the best single pool -- at worst it TIES the
+  // baseline. A fee-free 1-hop concrete single-pool route can therefore no longer
+  // legitimately beat the direct split, so handleQuote prunes the 1-hop
+  // duplicates UNCONDITIONALLY. With only a 1-hop route present, the multi-hop
+  // pass is skipped entirely and the direct split is selected. This replaces the
+  // pre-cap PR #26 behavior (which fell back to evaluating all routes here).
+  let findOptimalCallCount = 0;
   mockUtilsPricesSupabaseTxns(t);
 
   t.mock.module('../lib/quotes.js', {
     namedExports: {
-      // Direct split reports a fee-reduced 990 (raw split 1010 minus a >100% fee).
-      calculateOptimalSplit: async () => directSplitResult(111, 990),
-      findOptimalMultiHopRoute: async (routes) => {
-        findOptimalCalls.push(routes);
-        // A fee-free 1-hop concrete single-pool route worth 1000 legitimately
-        // beats the fee-reduced direct split under this broken config.
-        return { quote: { outputAmount: '1000', minimumOutputAmount: '1000', priceImpact: 0, hopQuotes: [], skippedPools: [] } };
-      },
-      createPoolInfoCache: () => ({ get: async () => null, peek: () => null }),
-      getPlatformFeeConfig: () => ({ feeBps: 20000, feeAddress: 'FEEADDR' })
+      // Direct split: raw split 1010 minus a >100% fee CAPPED at the gain (10)
+      // ties the best single pool at 1000 -- never below it.
+      calculateOptimalSplit: async () => directSplitResult(111, 1000),
+      findOptimalMultiHopRoute: async () => { findOptimalCallCount += 1; return null; },
+      createPoolInfoCache: () => ({ get: async () => null, peek: () => null })
     }
   });
 
@@ -205,11 +199,9 @@ test('broken platform fee (BPS > 10000): 1-hop routes are NOT pruned (behavior p
   const res = mockRes();
   await handleQuote({}, res, { inputToken: 1, outputToken: 2, amount: '1000', slippage: 0.01, address: undefined, poolId: undefined, dex: undefined });
 
-  assert.equal(findOptimalCalls.length, 1, 'multi-hop pass still runs under a broken fee config');
-  assert.equal(findOptimalCalls[0].length, 1, 'the 1-hop route is NOT pruned when the fee may invert selection');
-  assert.equal(findOptimalCalls[0][0], oneHop, 'the 1-hop route is the one preserved for evaluation');
-  // Selection preserved: the fee-free 1-hop (1000) beats the fee-reduced direct split (990).
+  assert.equal(findOptimalCallCount, 0, 'multi-hop machinery skipped: the 1-hop duplicate is pruned even under a broken fee config');
   assert.equal(res.statusCode, 200);
-  assert.equal(res.body.quote.outputAmount, '1000', 'the better fee-free route still wins, as before the change');
-  assert.equal(res.body.route.type, 'multi-hop');
+  assert.equal(res.body.quote.outputAmount, '1000', 'the capped direct split is selected (never below baseline)');
+  assert.equal(res.body.route.type, 'direct');
+  assert.equal(res.body.poolId, '111');
 });
