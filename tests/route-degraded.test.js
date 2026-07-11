@@ -108,8 +108,9 @@ test('routeDegraded signal: a timed-out pool is reported in skippedPools with re
   assert.equal(String(result.splitDetails[0].poolCfg.poolId), String(WORKING_POOL_ID));
   assert.equal(result.splitDetails[0].expectedOutput, '500');
 
-  // The failed pool is signaled, not silently dropped.
-  assert.deepEqual(result.skippedPools, [{ poolId: String(FAILING_POOL_ID), reason: 'timeout' }]);
+  // The failed pool is signaled, not silently dropped. The entry carries `dex`
+  // so skip/success reconciliation keys on (dex, poolId), not poolId alone.
+  assert.deepEqual(result.skippedPools, [{ poolId: String(FAILING_POOL_ID), dex: 'nomadex', reason: 'timeout' }]);
 
   // This is exactly the condition lib/handlers.js uses for routeDegraded.
   const routeDegraded = result.skippedPools.length > 0;
@@ -125,7 +126,7 @@ test('routeDegraded signal: a non-timeout thrown error is classified as reason "
     1, 2, 1000n, 0.01, ''
   );
 
-  assert.deepEqual(result.skippedPools, [{ poolId: String(FAILING_POOL_ID), reason: 'error' }]);
+  assert.deepEqual(result.skippedPools, [{ poolId: String(FAILING_POOL_ID), dex: 'nomadex', reason: 'error' }]);
 });
 
 test('routeDegraded signal: no false positive when every pool responds successfully', async (t) => {
