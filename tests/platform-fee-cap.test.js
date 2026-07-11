@@ -28,6 +28,13 @@
 // 50/50 split genuinely beat either single pool, so a real `gain` exists.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import algosdk from 'algosdk';
+
+// A real, checksum-valid AVM/Algorand fee-routing address. getPlatformFeeConfig
+// now requires a valid PLATFORM_FEE_ADDR whenever feeBps > 0, so every nonzero-
+// fee split below must run with a genuinely valid address (derived, never a
+// hardcoded checksum-invalid literal).
+const VALID_FEE_ADDR = algosdk.generateAccount().addr.toString();
 
 let importSeq = 0;
 async function importFreshQuotes() {
@@ -131,7 +138,7 @@ function sumMin(splitDetails) {
 
 test('real config (feeBps=5000): cap is a strict no-op; fee = gain*bps/10000 < gain', async (t) => {
   mockSplitDeps(t);
-  const result = await runSplit(5000, 'FEEADDR');
+  const result = await runSplit(5000, VALID_FEE_ADDR);
 
   // A genuine 2-pool split won.
   assert.equal(result.splitDetails.length, 2, 'a 2-pool split is selected');
@@ -168,7 +175,7 @@ test('TASK-56: misconfig (feeBps=10001) is rejected at config read (fails the qu
   // so calculateOptimalSplit fails fast with a clear error naming the var, the
   // value, and the 10000 ceiling — the broken fee never produces a quote.
   mockSplitDeps(t);
-  await assert.rejects(() => runSplit(10001, 'FEEADDR'), (err) => {
+  await assert.rejects(() => runSplit(10001, VALID_FEE_ADDR), (err) => {
     assert.ok(err instanceof Error);
     assert.match(err.message, /PLATFORM_FEE_BPS/);
     assert.match(err.message, /10001/);
@@ -182,7 +189,7 @@ test('TASK-54: aggregate fee is also capped at ΣM_i so reported min never goes 
   // At feeBps=10000 the uncapped/gain-capped fee is 100 > ΣM_i, so the ΣM_i cap
   // must clamp feeAmount to 60, keeping reported min (ΣM_i − F) at 0, not -40.
   mockSplitDeps(t, twoPoolCurve, (out) => out / 10n);
-  const result = await runSplit(10000, 'FEEADDR');
+  const result = await runSplit(10000, VALID_FEE_ADDR);
 
   assert.equal(result.splitDetails.length, 2, 'a 2-pool split is selected');
   const gain = BigInt(result.platformFee.gain);
@@ -211,7 +218,7 @@ test('TASK-54: multi-hop mode (distributeFeePerLeg=true) preserves legacy per-le
   // its proportional share of the fee (legs are NOT gross). This locks in that
   // Option C is scoped to direct routes and does not alter multi-hop amounts.
   mockSplitDeps(t);
-  const result = await runSplit(5000, 'FEEADDR', 2, /* distributeFeePerLeg */ true);
+  const result = await runSplit(5000, VALID_FEE_ADDR, 2, /* distributeFeePerLeg */ true);
 
   assert.equal(result.splitDetails.length, 2, 'a 2-pool split is selected');
   const feeAmount = BigInt(result.platformFee.feeAmount);
@@ -228,7 +235,7 @@ test('invariant: feeAmount never exceeds gain across a sweep of valid feeBps', a
   // config read (covered by the 10001-reject test above and the config suite).
   mockSplitDeps(t);
   for (const feeBps of [1, 100, 5000, 9999, 10000]) {
-    const result = await runSplit(feeBps, 'FEEADDR');
+    const result = await runSplit(feeBps, VALID_FEE_ADDR);
     const gain = BigInt(result.platformFee.gain);
     const feeAmount = BigInt(result.platformFee.feeAmount);
     assert.ok(feeAmount <= gain, `feeAmount (${feeAmount}) must not exceed gain (${gain}) at feeBps=${feeBps}`);
@@ -246,7 +253,7 @@ test('3+-pool path: fee also capped at gain (both fee sites covered)', async (t)
   const baseline = ammCurve(1_000_000n); // best single-pool output
 
   for (const feeBps of [5000, 10000]) {
-    const result = await runSplit(feeBps, 'FEEADDR', 3);
+    const result = await runSplit(feeBps, VALID_FEE_ADDR, 3);
     assert.ok(result.splitDetails.length >= 2, `a multi-pool split is selected at feeBps=${feeBps}`);
     assert.equal(result.platformFee.applied, true, `fee applied at feeBps=${feeBps}`);
 

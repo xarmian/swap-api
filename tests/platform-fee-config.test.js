@@ -16,19 +16,52 @@
 // var and restores it afterward. It is exported REAL for unit testing.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import algosdk from 'algosdk';
 import { getPlatformFeeConfig } from '../lib/quotes.js';
 
+// A real, checksum-valid AVM/Algorand address, derived (not hardcoded) so it can
+// never drift into a checksum-invalid literal. Used wherever a test needs a
+// valid PLATFORM_FEE_ADDR.
+const VALID_FEE_ADDR = algosdk.generateAccount().addr.toString();
+
 // Run `fn` with PLATFORM_FEE_BPS set to `value` (or unset when `value === undefined`),
-// restoring the prior env afterward.
+// restoring the prior env afterward. A valid PLATFORM_FEE_ADDR is set for the
+// duration so these BPS-parsing cases exercise ONLY the bps logic — nonzero-fee
+// values would otherwise trip the new addr requirement. Address-validation is
+// covered separately by withFeeConfig below.
 function withFeeBps(value, fn) {
   const prev = process.env.PLATFORM_FEE_BPS;
+  const prevAddr = process.env.PLATFORM_FEE_ADDR;
   if (value === undefined) delete process.env.PLATFORM_FEE_BPS;
   else process.env.PLATFORM_FEE_BPS = value;
+  process.env.PLATFORM_FEE_ADDR = VALID_FEE_ADDR;
   try {
     return fn();
   } finally {
     if (prev === undefined) delete process.env.PLATFORM_FEE_BPS;
     else process.env.PLATFORM_FEE_BPS = prev;
+    if (prevAddr === undefined) delete process.env.PLATFORM_FEE_ADDR;
+    else process.env.PLATFORM_FEE_ADDR = prevAddr;
+  }
+}
+
+// Run `fn` with BOTH PLATFORM_FEE_BPS and PLATFORM_FEE_ADDR set (or unset when
+// the value is `undefined`), restoring both afterward. Used by the fee-address
+// validation cases so each fully controls the addr state.
+function withFeeConfig(bps, addr, fn) {
+  const prevBps = process.env.PLATFORM_FEE_BPS;
+  const prevAddr = process.env.PLATFORM_FEE_ADDR;
+  if (bps === undefined) delete process.env.PLATFORM_FEE_BPS;
+  else process.env.PLATFORM_FEE_BPS = bps;
+  if (addr === undefined) delete process.env.PLATFORM_FEE_ADDR;
+  else process.env.PLATFORM_FEE_ADDR = addr;
+  try {
+    return fn();
+  } finally {
+    if (prevBps === undefined) delete process.env.PLATFORM_FEE_BPS;
+    else process.env.PLATFORM_FEE_BPS = prevBps;
+    if (prevAddr === undefined) delete process.env.PLATFORM_FEE_ADDR;
+    else process.env.PLATFORM_FEE_ADDR = prevAddr;
   }
 }
 
@@ -150,19 +183,77 @@ test('feeBps == 10001 throws a clear error naming the var, value, and 10000 max'
   });
 });
 
-test('feeAddress handling is unchanged (null when unset, passthrough when set)', () => {
-  const prevAddr = process.env.PLATFORM_FEE_ADDR;
-  try {
-    delete process.env.PLATFORM_FEE_ADDR;
-    withFeeBps('10', () => {
-      assert.equal(getPlatformFeeConfig().feeAddress, null);
+// TASK-58: a NONZERO platform fee requires a valid PLATFORM_FEE_ADDR — the fee
+// output has no recipient (routed to nowhere / lost) or produces a broken
+// transaction without one. Fail LOUDLY at config-read time (fail-fast, no
+// silent default), which via the eager getPlatformFeeConfig() call in index.js
+// also fails the server boot / serverless cold start. The zero-fee path is
+// deliberately untouched: no fee is charged, so the addr is not required.
+
+test('nonzero fee + valid PLATFORM_FEE_ADDR: no throw, address returned verbatim', () => {
+  withFeeConfig('10', VALID_FEE_ADDR, () => {
+    assert.doesNotThrow(() => getPlatformFeeConfig());
+    const cfg = getPlatformFeeConfig();
+    assert.equal(cfg.feeBps, 10);
+    assert.equal(cfg.feeAddress, VALID_FEE_ADDR);
+  });
+});
+
+test('nonzero fee + missing PLATFORM_FEE_ADDR throws, naming the var', () => {
+  withFeeConfig('10', undefined, () => {
+    assert.throws(() => getPlatformFeeConfig(), (err) => {
+      assert.ok(err instanceof Error);
+      assert.match(err.message, /PLATFORM_FEE_ADDR/);
+      return true;
     });
-    process.env.PLATFORM_FEE_ADDR = 'FEEADDR';
-    withFeeBps('10', () => {
-      assert.equal(getPlatformFeeConfig().feeAddress, 'FEEADDR');
+  });
+});
+
+test('nonzero fee + empty PLATFORM_FEE_ADDR throws (treated as missing)', () => {
+  withFeeConfig('10', '', () => {
+    assert.throws(() => getPlatformFeeConfig(), /PLATFORM_FEE_ADDR/);
+  });
+});
+
+test('nonzero fee + malformed PLATFORM_FEE_ADDR (bad checksum) throws via isValidAddress', () => {
+  // A right-length AVM address string with a flipped final char -> checksum
+  // fails, so algosdk.isValidAddress rejects it (a plain non-empty check would
+  // let it through and route the fee to a broken/unowned address).
+  const badChecksum = VALID_FEE_ADDR.slice(0, -1) + (VALID_FEE_ADDR.slice(-1) === 'A' ? 'B' : 'A');
+  withFeeConfig('10', badChecksum, () => {
+    assert.throws(() => getPlatformFeeConfig(), (err) => {
+      assert.ok(err instanceof Error);
+      assert.match(err.message, /PLATFORM_FEE_ADDR/);
+      return true;
     });
-  } finally {
-    if (prevAddr === undefined) delete process.env.PLATFORM_FEE_ADDR;
-    else process.env.PLATFORM_FEE_ADDR = prevAddr;
-  }
+  });
+});
+
+test('nonzero fee + malformed PLATFORM_FEE_ADDR (junk/wrong length) throws', () => {
+  withFeeConfig('10', 'FEEADDR', () => {
+    assert.throws(() => getPlatformFeeConfig(), /PLATFORM_FEE_ADDR/);
+  });
+});
+
+test('zero fee (feeBps=0) does NOT require an address: no throw even when unset', () => {
+  withFeeConfig('0', undefined, () => {
+    assert.doesNotThrow(() => getPlatformFeeConfig());
+    assert.equal(getPlatformFeeConfig().feeBps, 0);
+    assert.equal(getPlatformFeeConfig().feeAddress, null);
+  });
+});
+
+test('unset fee does NOT require an address: no throw, feeAddress null', () => {
+  withFeeConfig(undefined, undefined, () => {
+    assert.doesNotThrow(() => getPlatformFeeConfig());
+    assert.equal(getPlatformFeeConfig().feeBps, 0);
+    assert.equal(getPlatformFeeConfig().feeAddress, null);
+  });
+});
+
+test('zero fee + malformed address is still fine (no fee charged, addr ignored)', () => {
+  withFeeConfig('0', 'FEEADDR', () => {
+    assert.doesNotThrow(() => getPlatformFeeConfig());
+    assert.equal(getPlatformFeeConfig().feeAddress, 'FEEADDR');
+  });
 });
