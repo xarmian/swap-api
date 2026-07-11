@@ -2,8 +2,8 @@ import express from 'express';
 import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { handleQuote, handleUnwrap } from './lib/handlers.js';
-import { getPoolConfigById, loadConfigsOnce, poolsConfig, initializeConfig } from './lib/config.js';
+import { handleQuote, handleUnwrap, withDiscoveryWarning } from './lib/handlers.js';
+import { getPoolConfigById, loadConfigsOnce, poolsConfig, initializeConfig, getDiscoveryStatus } from './lib/config.js';
 import { getAllTokens } from './lib/discovery.js';
 import { algodClient, indexerClient } from './lib/clients.js';
 import {
@@ -31,13 +31,13 @@ app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-// Initialize config on startup (for serverless, this will be called on first request)
-let configInitialized = false;
+// Initialize config on startup (for serverless, this will be called on first request).
+// initializeConfig() is itself cheap once the initial discovery has completed (an
+// in-memory state check), and calling it on every request - rather than gating
+// behind a local "already initialized" flag - is what drives the request-triggered
+// failed-pool retry sweep in lib/config.js (see maybeRetryFailedPools, TASK-19).
 async function ensureConfigInitialized() {
-  if (!configInitialized) {
-    await initializeConfig();
-    configInitialized = true;
-  }
+  await initializeConfig();
 }
 
 // POST /quote endpoint
@@ -53,11 +53,14 @@ app.post('/quote', async (req, res) => {
       dex
     } = req.body;
 
-    // Validate required fields (address and poolId are now optional)
+    // Validate required fields (address and poolId are now optional). Wrapped
+    // with withDiscoveryWarning for a consistent response contract across
+    // every /quote exit (TASK-19, CONVE-35) even though these particular 400s
+    // are pure input-validation failures unrelated to pool discovery.
     if (inputToken === undefined || outputToken === undefined || !amount) {
-      return res.status(400).json({
+      return res.status(400).json(withDiscoveryWarning({
         error: 'Missing required fields: inputToken, outputToken, amount'
-      });
+      }, getDiscoveryStatus()));
     }
 
     // Validate amount is a well-formed positive integer STRING in base units,
@@ -92,9 +95,9 @@ app.post('/quote', async (req, res) => {
       slippage < 0 ||
       slippage >= 0.5
     ) {
-      return res.status(400).json({
+      return res.status(400).json(withDiscoveryWarning({
         error: 'Invalid slippageTolerance: must be a finite number in [0, 0.5)'
-      });
+      }, getDiscoveryStatus()));
     }
     const inputTokenStr = String(inputToken);
     const outputTokenStr = String(outputToken);
@@ -115,10 +118,16 @@ app.post('/quote', async (req, res) => {
     });
   } catch (error) {
     console.error('Error generating quote:', error);
-    res.status(500).json({
+    // Surfaces discovery status on this outer catch too (not just inside
+    // handleQuote), using the same discoveryWarning shape as every other
+    // /quote exit for a consistent response contract - the most likely cause
+    // landing here is ensureConfigInitialized() itself throwing (e.g. a
+    // below-threshold discovery failure), which is exactly a
+    // discovery-status-relevant error, not a generic bug (TASK-19, CONVE-35).
+    res.status(500).json(withDiscoveryWarning({
       error: 'Internal server error',
       message: error.message
-    });
+    }, getDiscoveryStatus()));
   }
 });
 
@@ -223,7 +232,9 @@ app.get('/config/pools', async (req, res) => {
   try {
     await ensureConfigInitialized();
     loadConfigsOnce();
-    res.json(poolsConfig);
+    // `discovery` surfaces any pools that failed and are pending TTL retry, so
+    // a partial pool set is visible instead of silently serving worse quotes.
+    res.json({ ...poolsConfig, discovery: getDiscoveryStatus() });
   } catch (e) {
     res.status(500).json({ error: 'Failed to load pools config', message: e.message });
   }
@@ -240,9 +251,18 @@ app.get('/config/tokens', async (req, res) => {
   }
 });
 
-// Health check endpoint
+// Health check endpoint. Reports 'degraded' (still HTTP 200 - the process is up
+// and serving) when some configured pools are missing and pending retry, so a
+// partial pool set is visible to operators/monitoring rather than looking
+// identical to a fully-healthy instance (TASK-19).
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok' });
+  const discovery = getDiscoveryStatus();
+  const status = !discovery.initialized
+    ? 'initializing'
+    : discovery.failedPools.length > 0
+      ? 'degraded'
+      : 'ok';
+  res.json({ status, discovery });
 });
 
 // Global JSON error handler. Must be registered after all routes/middleware

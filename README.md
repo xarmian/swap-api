@@ -37,50 +37,21 @@ Environment variables:
 
 ### Local Config
 
-Pools and token mappings are defined in `config/pools.json`. Optional token metadata (symbols/decimals) can be supplied in `config/tokens.json`.
-
-Example `config/pools.json` entry for a HumbleSwap pool (`395553`):
-
-```json
-{
-  "poolId": 395553,
-  "dex": "humbleswap",
-  "name": "USDC/VOI",
-  "tokens": {
-    "underlyingToWrapped": {
-      "0": 390001,
-      "302190": 395614
-    },
-    "wrappedPair": {
-      "tokA": 390001,
-      "tokB": 395614
-    },
-    "unwrap": [390001]
-  },
-  "slippageDefault": 0.01
-}
-```
-
-Example `config/pools.json` entry for a Nomadex pool (`411756`):
+Pool config is **not** hand-edited. `config/pool-ids.json` is the source of truth - just a
+flat array of on-chain pool IDs:
 
 ```json
-{
-  "poolId": 411756,
-  "dex": "nomadex",
-  "name": "VOI/USDC",
-  "tokens": {
-    "tokA": {
-      "id": 0,
-      "type": "native"
-    },
-    "tokB": {
-      "id": 302190,
-      "type": "ASA"
-    }
-  },
-  "slippageDefault": 0.01
-}
+[395553, 429999, 40120385]
 ```
+
+On startup the app discovers each pool on-chain (Mimir API + ulujs `Info()`) and builds its
+DEX type, token pair, wrap/unwrap mapping, and symbol/decimals metadata automatically - see
+`lib/discovery.js`. Discovery runs in parallel (bounded by `DISCOVERY_CONCURRENCY`, default
+6) and pools that fail transiently are retried automatically rather than left permanently
+missing; see "Pool discovery lifecycle" in `.env.example` and `DEPLOY.md`. Add or remove a
+pool by editing `config/pool-ids.json` and redeploying - `GET /config/pools` and
+`GET /config/tokens` return what was actually discovered (plus any pending failures) at
+runtime.
 
 ## Usage
 
