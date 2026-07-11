@@ -83,6 +83,11 @@ function isValidAssetId(value) {
 // POST /quote endpoint
 app.post('/quote', async (req, res) => {
   try {
+    // req.body is undefined (not {}) for a request with no body or a
+    // non-JSON content-type — express.json() only populates it when the
+    // content-type matches. Falling back to {} here (adjacent defect, folded
+    // in per CONVE-32) makes that hit the normal "Missing required fields"
+    // 400 below instead of a raw destructuring TypeError surfacing as a 500.
     const {
       address,
       inputToken,
@@ -91,7 +96,7 @@ app.post('/quote', async (req, res) => {
       slippageTolerance,
       poolId,
       dex
-    } = req.body;
+    } = req.body || {};
 
     // Validate required fields (address and poolId are now optional). Wrapped
     // with withDiscoveryWarning for a consistent response contract across

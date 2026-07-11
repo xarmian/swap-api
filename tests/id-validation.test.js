@@ -208,3 +208,28 @@ test('route-level: out-of-range/malformed ids are rejected with 400 on the real 
   const unwrapNoItemsBody = await unwrapNoItemsRes.json();
   assert.match(unwrapNoItemsBody.error, /items/);
 });
+
+test('route-level: POST /quote with no request body returns a clean 400, not a 500', async (t) => {
+  // req.body is `undefined` (not `{}`) for a request with no body/non-JSON
+  // content-type, since express.json() only populates it when the
+  // content-type matches. Destructuring req.body directly used to throw a
+  // raw TypeError here, surfacing as a 500 instead of the normal "Missing
+  // required fields" 400 (adjacent defect folded in per CONVE-32).
+  const server = app.listen(0);
+  await new Promise((resolve) => server.once('listening', resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const baseUrl = `http://localhost:${server.address().port}`;
+
+  const noBodyRes = await fetch(`${baseUrl}/quote`, { method: 'POST' });
+  assert.equal(noBodyRes.status, 400);
+  const noBodyJson = await noBodyRes.json();
+  assert.match(noBodyJson.error, /Missing required fields/);
+
+  const emptyJsonRes = await fetch(`${baseUrl}/quote`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' }
+  });
+  assert.equal(emptyJsonRes.status, 400);
+  const emptyJsonBody = await emptyJsonRes.json();
+  assert.match(emptyJsonBody.error, /Missing required fields/);
+});
