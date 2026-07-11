@@ -2,7 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { handleQuote, handleUnwrap } from './lib/handlers.js';
+import { handleQuote, handleUnwrap, withDiscoveryWarning } from './lib/handlers.js';
 import { getPoolConfigById, loadConfigsOnce, poolsConfig, initializeConfig, getDiscoveryStatus } from './lib/config.js';
 import { getAllTokens } from './lib/discovery.js';
 import { algodClient, indexerClient } from './lib/clients.js';
@@ -54,11 +54,14 @@ app.post('/quote', async (req, res) => {
       dex
     } = req.body;
 
-    // Validate required fields (address and poolId are now optional)
+    // Validate required fields (address and poolId are now optional). Wrapped
+    // with withDiscoveryWarning for a consistent response contract across
+    // every /quote exit (TASK-19, CONVE-35) even though these particular 400s
+    // are pure input-validation failures unrelated to pool discovery.
     if (inputToken === undefined || outputToken === undefined || !amount) {
-      return res.status(400).json({
+      return res.status(400).json(withDiscoveryWarning({
         error: 'Missing required fields: inputToken, outputToken, amount'
-      });
+      }, getDiscoveryStatus()));
     }
 
     // Default slippage tolerance to 1% only when omitted; honor an explicit 0.
@@ -71,9 +74,9 @@ app.post('/quote', async (req, res) => {
       slippage < 0 ||
       slippage >= 0.5
     ) {
-      return res.status(400).json({
+      return res.status(400).json(withDiscoveryWarning({
         error: 'Invalid slippageTolerance: must be a finite number in [0, 0.5)'
-      });
+      }, getDiscoveryStatus()));
     }
     const inputTokenStr = String(inputToken);
     const outputTokenStr = String(outputToken);
@@ -91,15 +94,15 @@ app.post('/quote', async (req, res) => {
   } catch (error) {
     console.error('Error generating quote:', error);
     // Surfaces discovery status on this outer catch too (not just inside
-    // handleQuote) - the most likely cause landing here is
-    // ensureConfigInitialized() itself throwing (e.g. a below-threshold
-    // discovery failure), which is exactly a discovery-status-relevant
-    // error, not a generic bug (TASK-19, CONVE-35).
-    res.status(500).json({
+    // handleQuote), using the same discoveryWarning shape as every other
+    // /quote exit for a consistent response contract - the most likely cause
+    // landing here is ensureConfigInitialized() itself throwing (e.g. a
+    // below-threshold discovery failure), which is exactly a
+    // discovery-status-relevant error, not a generic bug (TASK-19, CONVE-35).
+    res.status(500).json(withDiscoveryWarning({
       error: 'Internal server error',
-      message: error.message,
-      discovery: getDiscoveryStatus()
-    });
+      message: error.message
+    }, getDiscoveryStatus()));
   }
 });
 
