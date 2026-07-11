@@ -28,18 +28,30 @@ async function importFreshQuotes() {
   return import(`../lib/quotes.js?platformFeeCapTest=${importSeq}`);
 }
 
-// Concave output curve keyed on the exact candidate input amounts the split
-// path probes: full amount (1_000_000 -> 500 into ONE pool) vs a 50/50 leg
-// (500_000 -> 300 into EACH pool). So a 50/50 split yields 300+300 = 600,
+// Concave output curve keyed on the exact candidate input amounts the 2-pool
+// split path probes: full amount (1_000_000 -> 500 into ONE pool) vs a 50/50
+// leg (500_000 -> 300 into EACH pool). So a 50/50 split yields 300+300 = 600,
 // strictly beating the best single pool's 500 -> gain = 100.
-function mockedNomadexOutput(amountIn) {
+function twoPoolCurve(amountIn) {
   const a = BigInt(amountIn);
   if (a === 1_000_000n) return 500n;
   if (a === 500_000n) return 300n;
   return a / 2n;
 }
 
-function mockSplitDeps(t) {
+// Constant-product output curve out(a) = R*a/(K+a) -- genuinely concave for ANY
+// input, so splitting a trade across N equal-reserve pools beats one pool. Used
+// by the 3+-pool path (which grid-searches arbitrary allocations, not just the
+// two keyed amounts above).
+function ammCurve(amountIn) {
+  const a = BigInt(amountIn);
+  if (a <= 0n) return 0n;
+  const R = 1_000_000n;
+  const K = 1_000_000n;
+  return (R * a) / (K + a);
+}
+
+function mockSplitDeps(t, outFn = twoPoolCurve) {
   t.mock.module('../lib/utils.js', {
     namedExports: {
       getTokenDecimals: async () => 6,
@@ -68,7 +80,7 @@ function mockSplitDeps(t) {
     namedExports: {
       NOMADEX_FEE_SCALE: 10000n,
       getPoolInfo: async () => ({ tokA: 1, tokB: 2, reserveA: 1_000_000n, reserveB: 1_000_000n, fee: 30, feeScale: 10000n }),
-      calculateOutputAmount: (amountIn) => mockedNomadexOutput(amountIn)
+      calculateOutputAmount: (amountIn) => outFn(amountIn)
     }
   });
   t.mock.module('../lib/humbleswap.js', {
@@ -81,13 +93,14 @@ function mockSplitDeps(t) {
   });
 }
 
-// Two equal-reserve Nomadex pools over token pair (1, 2).
-const POOLS = [
-  { poolId: 7001, dex: 'nomadex', tokens: { tokA: { id: 1 }, tokB: { id: 2 } } },
-  { poolId: 7002, dex: 'nomadex', tokens: { tokA: { id: 1 }, tokB: { id: 2 } } }
-];
+// Equal-reserve Nomadex pools over token pair (1, 2).
+function pools(n) {
+  return Array.from({ length: n }, (_, i) => ({
+    poolId: 7001 + i, dex: 'nomadex', tokens: { tokA: { id: 1 }, tokB: { id: 2 } }
+  }));
+}
 
-async function runSplit(feeBps, feeAddr) {
+async function runSplit(feeBps, feeAddr, poolCount = 2) {
   const { createPoolInfoCache, calculateOptimalSplit } = await importFreshQuotes();
   const prevBps = process.env.PLATFORM_FEE_BPS;
   const prevAddr = process.env.PLATFORM_FEE_ADDR;
@@ -95,7 +108,7 @@ async function runSplit(feeBps, feeAddr) {
   if (feeAddr === null) delete process.env.PLATFORM_FEE_ADDR;
   else process.env.PLATFORM_FEE_ADDR = feeAddr;
   try {
-    return await calculateOptimalSplit(POOLS, 1, 2, 1_000_000n, 0.01, '', createPoolInfoCache());
+    return await calculateOptimalSplit(pools(poolCount), 1, 2, 1_000_000n, 0.01, '', createPoolInfoCache());
   } finally {
     if (prevBps === undefined) delete process.env.PLATFORM_FEE_BPS; else process.env.PLATFORM_FEE_BPS = prevBps;
     if (prevAddr === undefined) delete process.env.PLATFORM_FEE_ADDR; else process.env.PLATFORM_FEE_ADDR = prevAddr;
@@ -165,5 +178,31 @@ test('invariant: feeAmount never exceeds gain across a sweep of feeBps', async (
     assert.ok(feeAmount <= gain, `feeAmount (${feeAmount}) must not exceed gain (${gain}) at feeBps=${feeBps}`);
     // Net split output is always >= the single-pool baseline (500).
     assert.ok(sumExpected(result.splitDetails) >= 500n, `net split >= baseline at feeBps=${feeBps}`);
+  }
+});
+
+test('3+-pool path: fee also capped at gain (both fee sites covered)', async (t) => {
+  // Exercises the separate 3+-pool fee-application site with a genuinely concave
+  // AMM curve, so a multi-pool grid split beats the best single pool.
+  mockSplitDeps(t, ammCurve);
+  const baseline = ammCurve(1_000_000n); // best single-pool output
+
+  for (const feeBps of [5000, 10000, 20000, 1000000]) {
+    const result = await runSplit(feeBps, 'FEEADDR', 3);
+    assert.ok(result.splitDetails.length >= 2, `a multi-pool split is selected at feeBps=${feeBps}`);
+    assert.equal(result.platformFee.applied, true, `fee applied at feeBps=${feeBps}`);
+
+    const gain = BigInt(result.platformFee.gain);
+    const feeAmount = BigInt(result.platformFee.feeAmount);
+    assert.ok(gain > 0n, `a real gain exists at feeBps=${feeBps}`);
+    assert.ok(feeAmount <= gain, `3+-pool feeAmount (${feeAmount}) must not exceed gain (${gain}) at feeBps=${feeBps}`);
+    if (feeBps > 10000) {
+      assert.equal(feeAmount, gain, `3+-pool fee capped exactly at gain at feeBps=${feeBps}`);
+    } else {
+      assert.equal(feeAmount, (gain * BigInt(feeBps)) / 10000n, `3+-pool cap is a no-op at feeBps=${feeBps}`);
+    }
+    // Net split output never pushed below the single-pool baseline.
+    assert.ok(sumExpected(result.splitDetails) >= baseline, `net split >= baseline at feeBps=${feeBps}`);
+    assert.equal(sumMin(result.splitDetails), sumExpected(result.splitDetails), `min tracks expected at feeBps=${feeBps}`);
   }
 });
