@@ -12,9 +12,22 @@ import {
 import {
   getPoolInfo200 as getHumbleswapPoolInfo200
 } from './lib/humbleswap.js';
+import { getPlatformFeeConfig } from './lib/quotes.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+// Validate the platform fee config EAGERLY at module init — before the server
+// listens and independent of the on-chain discovery pipeline (TASK-57).
+// getPlatformFeeConfig() throws on an invalid PLATFORM_FEE_BPS
+// (fractional/non-numeric/negative/>10000, PR #32/#34) but otherwise only runs
+// LAZILY on the first multi-pool quote, so a broken fee config would boot and
+// fail only later. This bare module-scope call runs on import, covering BOTH
+// `node index.js` (uncaught throw → clear error, non-zero exit) and the Vercel
+// serverless import (the throw fails the cold start). It's a pure env read (no
+// network I/O), so it never triggers initializeConfig()/discovery. The lazy
+// check inside getPlatformFeeConfig stays unchanged as defense-in-depth.
+getPlatformFeeConfig();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
