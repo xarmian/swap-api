@@ -40,9 +40,54 @@ async function ensureConfigInitialized() {
   await initializeConfig();
 }
 
+// Upper bound enforced on every asset/app id (inputToken, outputToken,
+// poolId, wrappedTokenId) accepted at the API boundary. Internally, ids are
+// converted via Number() throughout lib/ (lib/quotes.js, lib/humbleswap.js,
+// lib/nomadex.js, lib/discovery.js, lib/utils.js decimals cache key,
+// lib/config.js wrapped-token cache, etc. — TASK-45). A numeric id above
+// Number.MAX_SAFE_INTEGER (2^53-1) would silently round to a DIFFERENT
+// integer there, which could route/quote the wrong asset. Migrating that
+// internal handling to BigInt/string end-to-end was evaluated and rejected
+// (too large/risky a change for no realistic benefit — Algorand/Voi asset
+// and app ids are currently in the tens of millions). Instead, reject any
+// out-of-range id here, before it ever reaches a Number() call (CONVE-35:
+// reject, never coerce/clamp to a plausible-but-wrong id).
+//
+// Only STRING ids are accepted (like `amount` above, and like poolId's
+// existing URL-param contract) — deliberately NOT a bare JSON `number`.
+// express.json() runs JSON.parse on the request body before this function
+// ever sees a value: a numeric wire literal has already been rounded to the
+// nearest IEEE-754 double by then, so a malformed/fractional id right at the
+// Number.MAX_SAFE_INTEGER boundary (e.g. wire text `9007199254740991.1`)
+// would silently arrive here already collapsed into a clean-looking integer,
+// with no way to tell it was malformed. Requiring a digit STRING sidesteps
+// that class of precision loss entirely, exactly as the amount validation
+// above already does for the identical reason.
+function isValidAssetId(value) {
+  if (typeof value !== 'string') return false;
+  // Deliberately NOT trimmed (unlike `amount` above): isValidAssetId only
+  // returns a boolean, not a sanitized value, so every call site downstream
+  // (String(inputToken), handleQuote, handleUnwrap, etc.) keeps using the
+  // ORIGINAL, unmodified string. Validating a trimmed copy here while
+  // downstream code forwards the untrimmed original would let a
+  // whitespace-padded id (e.g. " 12345") pass validation but reach lib/ in a
+  // form that may not match a clean id string used elsewhere (map keys,
+  // strict equality against config ids), so padding is rejected outright.
+  if (!/^[0-9]+$/.test(value)) return false;
+  // Compare in BigInt, not Number: `Number(value) <= Number.MAX_SAFE_INTEGER`
+  // would first round a huge numeric string, which is exactly the precision
+  // loss this check exists to catch.
+  return BigInt(value) <= BigInt(Number.MAX_SAFE_INTEGER);
+}
+
 // POST /quote endpoint
 app.post('/quote', async (req, res) => {
   try {
+    // req.body is undefined (not {}) for a request with no body or a
+    // non-JSON content-type — express.json() only populates it when the
+    // content-type matches. Falling back to {} here (adjacent defect, folded
+    // in per CONVE-32) makes that hit the normal "Missing required fields"
+    // 400 below instead of a raw destructuring TypeError surfacing as a 500.
     const {
       address,
       inputToken,
@@ -51,7 +96,7 @@ app.post('/quote', async (req, res) => {
       slippageTolerance,
       poolId,
       dex
-    } = req.body;
+    } = req.body || {};
 
     // Validate required fields (address and poolId are now optional). Wrapped
     // with withDiscoveryWarning for a consistent response contract across
@@ -60,6 +105,20 @@ app.post('/quote', async (req, res) => {
     if (inputToken === undefined || outputToken === undefined || !amount) {
       return res.status(400).json(withDiscoveryWarning({
         error: 'Missing required fields: inputToken, outputToken, amount'
+      }, getDiscoveryStatus()));
+    }
+
+    // Validate inputToken/outputToken/poolId are digit-string ids within
+    // Number.MAX_SAFE_INTEGER before anything downstream calls Number() on
+    // them (TASK-45, CONVE-35 — see isValidAssetId doc comment above).
+    if (!isValidAssetId(inputToken) || !isValidAssetId(outputToken)) {
+      return res.status(400).json(withDiscoveryWarning({
+        error: `Invalid inputToken/outputToken: must be a string of digits (asset/app id) <= ${Number.MAX_SAFE_INTEGER}`
+      }, getDiscoveryStatus()));
+    }
+    if (poolId !== undefined && poolId !== null && !isValidAssetId(poolId)) {
+      return res.status(400).json(withDiscoveryWarning({
+        error: `Invalid poolId: must be a string of digits (asset/app id) <= ${Number.MAX_SAFE_INTEGER}`
       }, getDiscoveryStatus()));
     }
 
@@ -134,6 +193,33 @@ app.post('/quote', async (req, res) => {
 // POST /unwrap endpoint
 app.post('/unwrap', async (req, res) => {
   try {
+    // Validate items and every item's wrappedTokenId before
+    // ensureConfigInitialized() so a malformed request fails fast without
+    // network I/O (TASK-45). The `items` array-shape check mirrors
+    // handleUnwrap's own check byte-for-byte (same message) purely to move
+    // it ahead of the network call for a request that's already known to be
+    // malformed — handleUnwrap's check is unchanged and still runs as a
+    // backstop for any caller that reaches it directly. wrappedTokenId
+    // PRESENCE is required here (not just format-when-present): downstream,
+    // buildBatchUnwrapTransactions (lib/transactions.js) throws a generic
+    // "Each item must include wrappedTokenId and amount" Error for a missing
+    // id, whose message doesn't match handleUnwrap's isClientError substring
+    // list — so without this check a missing wrappedTokenId would 500
+    // instead of 400 (adjacent defect, folded in per CONVE-32). Full item
+    // shape/`amount` validation otherwise stays with handleUnwrap, unchanged.
+    const { items } = req.body || {};
+    if (!Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ error: 'items array is required and must be non-empty' });
+    }
+    const badItemIndex = items.findIndex(
+      (item) => !item || !isValidAssetId(item.wrappedTokenId)
+    );
+    if (badItemIndex !== -1) {
+      return res.status(400).json({
+        error: `Invalid items[${badItemIndex}].wrappedTokenId: required, must be a string of digits (asset id) <= ${Number.MAX_SAFE_INTEGER}`
+      });
+    }
+
     await ensureConfigInitialized();
     return await handleUnwrap(req, res);
   } catch (error) {
@@ -148,12 +234,20 @@ app.post('/unwrap', async (req, res) => {
 // GET /pool/:poolId - Get pool information
 app.get('/pool/:poolId', async (req, res) => {
   try {
-    await ensureConfigInitialized();
     const { poolId } = req.params;
 
     if (!poolId) {
       return res.status(400).json({ error: 'Pool ID is required' });
     }
+    // Validated before ensureConfigInitialized() so an out-of-range id fails
+    // fast without network I/O (TASK-45; matches the /quote id/amount checks).
+    if (!isValidAssetId(poolId)) {
+      return res.status(400).json({
+        error: `Invalid poolId: must be a string of digits (asset/app id) <= ${Number.MAX_SAFE_INTEGER}`
+      });
+    }
+
+    await ensureConfigInitialized();
 
     // Get pool config to determine DEX type
     const poolCfg = getPoolConfigById(poolId);
@@ -302,6 +396,9 @@ if (!process.env.VERCEL) {
     process.exit(1);
   });
 }
+
+// Named export for unit testing (TASK-45); default export below is unchanged.
+export { isValidAssetId };
 
 // Export app for Vercel serverless function
 export default app;

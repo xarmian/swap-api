@@ -671,7 +671,10 @@
                     const amount = row.querySelector('.item-amount').value;
                     if (wrappedTokenId && amount) {
                         items.push({
-                            wrappedTokenId: parseInt(wrappedTokenId),
+                            // wrappedTokenId must be sent as a digit string,
+                            // not a JSON number (TASK-45) — parseInt() here
+                            // would 400 against the API's boundary validation.
+                            wrappedTokenId: wrappedTokenId,
                             amount: amount
                         });
                     }

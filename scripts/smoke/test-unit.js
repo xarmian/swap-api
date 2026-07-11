@@ -9,8 +9,8 @@ async function testQuote() {
 
     const requestBody = {
       address: 'BUD2763FMK6EYVKGHWWUN4QKHPSPCVFUEPPI4PQCPGYVPGQ6GNKBX6IXCQ',
-      inputToken: 0,  // UNIT
-      outputToken: 420069,      // Native VOI (will be wrapped to wVOI)
+      inputToken: '0',  // UNIT
+      outputToken: '420069',      // Native VOI (will be wrapped to wVOI)
       amount: '80000000000', // 1 UNIT
       slippageTolerance: 0.01,
     };
@@ -50,8 +50,8 @@ async function testUnwrapBatch() {
     const requestBody = {
       address: 'BUD2763FMK6EYVKGHWWUN4QKHPSPCVFUEPPI4PQCPGYVPGQ6GNKBX6IXCQ',
       items: [
-        { wrappedTokenId: 390001, amount: '100000' },
-        { wrappedTokenId: 395614, amount: '250000' }
+        { wrappedTokenId: '390001', amount: '100000' },
+        { wrappedTokenId: '395614', amount: '250000' }
       ]
     };
 

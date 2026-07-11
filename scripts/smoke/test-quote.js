@@ -9,8 +9,8 @@ async function testQuote() {
 
     const requestBody = {
       address: '4LI2Z52C3WKIPFTVMCUJ5LSYU4KLUA6JNMQAQQRI6RAVIMZWAPI52F5YKY',
-      inputToken: 302190,  // USDC ASA (will be wrapped to aUSDC)
-      outputToken: 0,      // Native VOI (will be wrapped to wVOI)
+      inputToken: '302190',  // USDC ASA (will be wrapped to aUSDC)
+      outputToken: '0',      // Native VOI (will be wrapped to wVOI)
       amount: '100000',
       slippageTolerance: 0.01,
       poolId: '395553'
