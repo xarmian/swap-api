@@ -101,6 +101,20 @@ test('coercion-underflow values that Number() rounds to 0 still throw (no silent
   }
 });
 
+test('digit strings past Number.MAX_SAFE_INTEGER throw (no silent precision loss)', () => {
+  // Number("9007199254740993") === 9007199254740992 (precision lost); a plain
+  // Number.isInteger check would accept the corrupted value. isSafeInteger rejects it.
+  for (const bad of ['9007199254740993', '99999999999999999999']) {
+    withFeeBps(bad, () => {
+      assert.throws(() => getPlatformFeeConfig(), (err) => {
+        assert.ok(err instanceof Error);
+        assert.match(err.message, /PLATFORM_FEE_BPS/);
+        return true;
+      }, `expected "${bad}" to throw`);
+    });
+  }
+});
+
 test('negative PLATFORM_FEE_BPS throws a clear error', () => {
   withFeeBps('-1', () => {
     assert.throws(() => getPlatformFeeConfig(), /PLATFORM_FEE_BPS/);
