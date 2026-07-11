@@ -8,6 +8,10 @@
 //   - SET valid non-negative integer  -> parses exactly as before.
 //   - SET but non-integer / non-finite / negative -> clear Error naming the var + value.
 //
+// TASK-56 extends the fail-fast policy with a hard ceiling: 10000 bps = 100% of
+// the multi-pool gain is the maximum sensible fee, so feeBps == 10000 is allowed
+// but any value > 10000 throws at config read (previously only console.warn'd).
+//
 // getPlatformFeeConfig reads process.env directly, so each case swaps the env
 // var and restores it afterward. It is exported REAL for unit testing.
 import test from 'node:test';
@@ -124,6 +128,25 @@ test('negative PLATFORM_FEE_BPS throws a clear error', () => {
 test('non-finite PLATFORM_FEE_BPS (Infinity) throws before reaching BigInt()', () => {
   withFeeBps('Infinity', () => {
     assert.throws(() => getPlatformFeeConfig(), /PLATFORM_FEE_BPS/);
+  });
+});
+
+test('feeBps == 10000 is allowed (100%-of-gain ceiling, no throw)', () => {
+  withFeeBps('10000', () => {
+    assert.doesNotThrow(() => getPlatformFeeConfig());
+    assert.equal(getPlatformFeeConfig().feeBps, 10000);
+  });
+});
+
+test('feeBps == 10001 throws a clear error naming the var, value, and 10000 max', () => {
+  withFeeBps('10001', () => {
+    assert.throws(() => getPlatformFeeConfig(), (err) => {
+      assert.ok(err instanceof Error);
+      assert.match(err.message, /PLATFORM_FEE_BPS/);
+      assert.match(err.message, /10001/);
+      assert.match(err.message, /10000/);
+      return true;
+    });
   });
 });
 

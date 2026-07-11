@@ -161,11 +161,12 @@ test('direct match with only 1-hop routes: findOptimalMultiHopRoute is never cal
   assert.equal(res.body.poolId, '111');
 });
 
-test('broken platform fee (BPS > 10000): 1-hop routes are STILL pruned (fee now capped at gain)', async (t) => {
-  // TASK-51: calculateOptimalSplit now caps the platform fee at the realized
-  // gain, so even under a misconfigured PLATFORM_FEE_BPS > 10000 the fee-adjusted
-  // split can never fall below the best single pool -- at worst it TIES the
-  // baseline. A fee-free 1-hop concrete single-pool route can therefore no longer
+test('max platform fee (feeBps=10000 consumes the whole gain): 1-hop routes are STILL pruned', async (t) => {
+  // TASK-51: calculateOptimalSplit caps the platform fee at the realized gain.
+  // TASK-56 hard-rejects feeBps > 10000 at config read, so the worst VALID fee is
+  // feeBps=10000 — the fee consumes the entire gain and the fee-adjusted split
+  // can never fall below the best single pool; at worst it TIES the baseline. A
+  // fee-free 1-hop concrete single-pool route can therefore no longer
   // legitimately beat the direct split, so handleQuote prunes the 1-hop
   // duplicates UNCONDITIONALLY. With only a 1-hop route present, the multi-hop
   // pass is skipped entirely and the direct split is selected. This replaces the
@@ -175,8 +176,8 @@ test('broken platform fee (BPS > 10000): 1-hop routes are STILL pruned (fee now 
 
   t.mock.module('../lib/quotes.js', {
     namedExports: {
-      // Direct split: raw split 1010 minus a >100% fee CAPPED at the gain (10)
-      // ties the best single pool at 1000 -- never below it.
+      // Direct split: raw split 1010 minus a 100% fee (feeBps=10000) that equals
+      // the gain (10) ties the best single pool at 1000 -- never below it.
       calculateOptimalSplit: async () => directSplitResult(111, 1000),
       findOptimalMultiHopRoute: async () => { findOptimalCallCount += 1; return null; },
       createPoolInfoCache: () => ({ get: async () => null, peek: () => null })

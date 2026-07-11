@@ -6,12 +6,19 @@
 //   feeAmount = min(gain * feeBps / 10000, gain)   (BigInt throughout)
 //
 // Consequences these tests pin down:
-//   - For every real config (feeBps <= 10000) the cap is a strict NO-OP:
+//   - For every real config (feeBps <= 10000) the gain cap is a strict NO-OP:
 //     feeAmount == gain*feeBps/10000, identical to the pre-cap behavior.
-//   - For a misconfigured feeBps > 10000 the fee is capped at `gain`, so the
-//     fee-adjusted split output stays >= the best single-pool baseline and the
-//     user is never pushed below it. This is the ONLY behavioral change.
-//   - feeAmount NEVER exceeds gain in any configuration.
+//   - feeAmount NEVER exceeds gain in any valid configuration.
+//
+// TASK-56: a misconfigured feeBps > 10000 is now HARD-REJECTED at config read
+// (getPlatformFeeConfig throws), so it can never reach the runtime fee-cap math
+// — a test below asserts the whole quote pipeline fails fast on 10001. The
+// runtime caps in calculateOptimalSplit are KEPT as defense-in-depth: they and
+// the config validation are separate layers guarding different invariants. The
+// #33 ΣM_i cap is still reachable with a VALID config (feeBps=10000, gain>ΣM_i)
+// and its test remains; the #29 gain cap is a no-op boundary for all valid
+// configs (uncappedFee <= gain when feeBps <= 10000) and stays as a belt-and-
+// suspenders guard against a future fee-formula change or validation regression.
 //
 // The quote engine talks to algod/indexer several layers deep, so we mock
 // lib/nomadex.js / lib/utils.js / lib/config.js wholesale (exactly the symbols
@@ -155,31 +162,19 @@ test('real config (feeBps=5000): cap is a strict no-op; fee = gain*bps/10000 < g
   assert.ok(reportedNet >= 500n, 'net still >= single-pool baseline');
 });
 
-test('misconfig (feeBps=20000): fee capped at gain; user never pushed below baseline', async (t) => {
+test('TASK-56: misconfig (feeBps=10001) is rejected at config read (fails the quote)', async (t) => {
+  // A confiscatory feeBps > 10000 no longer reaches the runtime fee-cap math:
+  // getPlatformFeeConfig throws when the config is read during quote processing,
+  // so calculateOptimalSplit fails fast with a clear error naming the var, the
+  // value, and the 10000 ceiling — the broken fee never produces a quote.
   mockSplitDeps(t);
-  const result = await runSplit(20000, 'FEEADDR');
-
-  assert.equal(result.splitDetails.length, 2, 'a 2-pool split is selected');
-  assert.equal(result.platformFee.applied, true, 'platform fee applied to the multi-pool winner');
-
-  const gain = BigInt(result.platformFee.gain);
-  const feeAmount = BigInt(result.platformFee.feeAmount);
-  assert.equal(gain, 100n, 'gain unchanged (selection is by raw output)');
-
-  // Uncapped would be 100 * 20000 / 10000 = 200 (> gain); the cap clamps to gain.
-  assert.equal(feeAmount, gain, 'fee is capped exactly at the realized gain');
-  assert.ok(feeAmount < 200n, 'fee is strictly below the uncapped 200');
-
-  // Option C: split legs stay GROSS (600); the fee is subtracted once at the
-  // aggregate level. Reported net ties the single-pool baseline (600 − 100 =
-  // 500) and is NEVER below it -- the inversion PR #26's guard protected against.
-  assert.equal(sumExpected(result.splitDetails), 600n, 'split legs are GROSS (no per-leg fee)');
-  assert.equal(sumMin(result.splitDetails), sumExpected(result.splitDetails), 'gross min tracks gross expected');
-  const reportedNet = sumExpected(result.splitDetails) - feeAmount;
-  const reportedMin = sumMin(result.splitDetails) - feeAmount;
-  assert.equal(reportedNet, 500n, 'reported net == ΣG_i − F (600 − 100) == single-pool baseline (not below)');
-  assert.equal(reportedMin, 500n, 'reported min == ΣM_i − F (600 − 100)');
-  assert.ok(reportedNet >= 500n, 'reported net >= single-pool baseline');
+  await assert.rejects(() => runSplit(10001, 'FEEADDR'), (err) => {
+    assert.ok(err instanceof Error);
+    assert.match(err.message, /PLATFORM_FEE_BPS/);
+    assert.match(err.message, /10001/);
+    assert.match(err.message, /10000/);
+    return true;
+  });
 });
 
 test('TASK-54: aggregate fee is also capped at ΣM_i so reported min never goes negative', async (t) => {
@@ -228,9 +223,11 @@ test('TASK-54: multi-hop mode (distributeFeePerLeg=true) preserves legacy per-le
   assert.equal(sumMin(result.splitDetails), 550n, 'multi-hop min legs stay fee-reduced (identity slippage)');
 });
 
-test('invariant: feeAmount never exceeds gain across a sweep of feeBps', async (t) => {
+test('invariant: feeAmount never exceeds gain across a sweep of valid feeBps', async (t) => {
+  // Sweep only the VALID range [0, 10000]; values above 10000 are rejected at
+  // config read (covered by the 10001-reject test above and the config suite).
   mockSplitDeps(t);
-  for (const feeBps of [1, 100, 5000, 9999, 10000, 10001, 20000, 1000000]) {
+  for (const feeBps of [1, 100, 5000, 9999, 10000]) {
     const result = await runSplit(feeBps, 'FEEADDR');
     const gain = BigInt(result.platformFee.gain);
     const feeAmount = BigInt(result.platformFee.feeAmount);
@@ -248,7 +245,7 @@ test('3+-pool path: fee also capped at gain (both fee sites covered)', async (t)
   mockSplitDeps(t, ammCurve);
   const baseline = ammCurve(1_000_000n); // best single-pool output
 
-  for (const feeBps of [5000, 10000, 20000, 1000000]) {
+  for (const feeBps of [5000, 10000]) {
     const result = await runSplit(feeBps, 'FEEADDR', 3);
     assert.ok(result.splitDetails.length >= 2, `a multi-pool split is selected at feeBps=${feeBps}`);
     assert.equal(result.platformFee.applied, true, `fee applied at feeBps=${feeBps}`);
@@ -257,11 +254,8 @@ test('3+-pool path: fee also capped at gain (both fee sites covered)', async (t)
     const feeAmount = BigInt(result.platformFee.feeAmount);
     assert.ok(gain > 0n, `a real gain exists at feeBps=${feeBps}`);
     assert.ok(feeAmount <= gain, `3+-pool feeAmount (${feeAmount}) must not exceed gain (${gain}) at feeBps=${feeBps}`);
-    if (feeBps > 10000) {
-      assert.equal(feeAmount, gain, `3+-pool fee capped exactly at gain at feeBps=${feeBps}`);
-    } else {
-      assert.equal(feeAmount, (gain * BigInt(feeBps)) / 10000n, `3+-pool cap is a no-op at feeBps=${feeBps}`);
-    }
+    // For all valid configs the gain cap is a no-op: feeAmount == gain*bps/10000.
+    assert.equal(feeAmount, (gain * BigInt(feeBps)) / 10000n, `3+-pool cap is a no-op at feeBps=${feeBps}`);
     // Option C: legs are GROSS. The aggregate gross output equals gain + baseline
     // (no per-leg fee flooring -> dust == 0), and reported net (ΣG_i − F) is
     // never pushed below the single-pool baseline.
