@@ -65,15 +65,19 @@ async function ensureConfigInitialized() {
 // above already does for the identical reason.
 function isValidAssetId(value) {
   if (typeof value !== 'string') return false;
-  const str = value.trim();
-  // Digits only (no sign, no decimal point, no exponent) so a negative,
-  // fractional, or scientific-notation value is rejected outright rather
-  // than coerced.
-  if (!/^[0-9]+$/.test(str)) return false;
-  // Compare in BigInt, not Number: `Number(str) <= Number.MAX_SAFE_INTEGER`
+  // Deliberately NOT trimmed (unlike `amount` above): isValidAssetId only
+  // returns a boolean, not a sanitized value, so every call site downstream
+  // (String(inputToken), handleQuote, handleUnwrap, etc.) keeps using the
+  // ORIGINAL, unmodified string. Validating a trimmed copy here while
+  // downstream code forwards the untrimmed original would let a
+  // whitespace-padded id (e.g. " 12345") pass validation but reach lib/ in a
+  // form that may not match a clean id string used elsewhere (map keys,
+  // strict equality against config ids), so padding is rejected outright.
+  if (!/^[0-9]+$/.test(value)) return false;
+  // Compare in BigInt, not Number: `Number(value) <= Number.MAX_SAFE_INTEGER`
   // would first round a huge numeric string, which is exactly the precision
   // loss this check exists to catch.
-  return BigInt(str) <= BigInt(Number.MAX_SAFE_INTEGER);
+  return BigInt(value) <= BigInt(Number.MAX_SAFE_INTEGER);
 }
 
 // POST /quote endpoint
@@ -184,9 +188,14 @@ app.post('/quote', async (req, res) => {
 // POST /unwrap endpoint
 app.post('/unwrap', async (req, res) => {
   try {
-    // Validate every item's wrappedTokenId before ensureConfigInitialized()
-    // so an out-of-range/missing id fails fast without network I/O (TASK-45).
-    // Presence is required here (not just format-when-present): downstream,
+    // Validate items and every item's wrappedTokenId before
+    // ensureConfigInitialized() so a malformed request fails fast without
+    // network I/O (TASK-45). The `items` array-shape check mirrors
+    // handleUnwrap's own check byte-for-byte (same message) purely to move
+    // it ahead of the network call for a request that's already known to be
+    // malformed — handleUnwrap's check is unchanged and still runs as a
+    // backstop for any caller that reaches it directly. wrappedTokenId
+    // PRESENCE is required here (not just format-when-present): downstream,
     // buildBatchUnwrapTransactions (lib/transactions.js) throws a generic
     // "Each item must include wrappedTokenId and amount" Error for a missing
     // id, whose message doesn't match handleUnwrap's isClientError substring
@@ -194,15 +203,16 @@ app.post('/unwrap', async (req, res) => {
     // instead of 400 (adjacent defect, folded in per CONVE-32). Full item
     // shape/`amount` validation otherwise stays with handleUnwrap, unchanged.
     const { items } = req.body || {};
-    if (Array.isArray(items)) {
-      const badItemIndex = items.findIndex(
-        (item) => !item || !isValidAssetId(item.wrappedTokenId)
-      );
-      if (badItemIndex !== -1) {
-        return res.status(400).json({
-          error: `Invalid items[${badItemIndex}].wrappedTokenId: required, must be a string of digits (asset id) <= ${Number.MAX_SAFE_INTEGER}`
-        });
-      }
+    if (!Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ error: 'items array is required and must be non-empty' });
+    }
+    const badItemIndex = items.findIndex(
+      (item) => !item || !isValidAssetId(item.wrappedTokenId)
+    );
+    if (badItemIndex !== -1) {
+      return res.status(400).json({
+        error: `Invalid items[${badItemIndex}].wrappedTokenId: required, must be a string of digits (asset id) <= ${Number.MAX_SAFE_INTEGER}`
+      });
     }
 
     await ensureConfigInitialized();

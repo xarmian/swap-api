@@ -75,8 +75,17 @@ test('rejects null, undefined, objects, and arrays', () => {
   assert.equal(isValidAssetId(['12345']), false);
 });
 
-test('tolerates surrounding whitespace like the existing amount validation does', () => {
-  assert.equal(isValidAssetId(' 12345 '), true);
+test('rejects whitespace-padded digit strings (no sanitized value is returned to forward downstream)', () => {
+  // Unlike `amount` (which validates a trimmed copy AND forwards that same
+  // trimmed copy downstream), isValidAssetId only returns a boolean — every
+  // call site keeps using the original, unmodified string it was given. If
+  // padding were tolerated here, a caller could pass validation with
+  // " 12345" while the untrimmed, padded string still flows downstream to
+  // handleQuote/handleUnwrap and any strict (non-Number()) comparisons
+  // there, so padding must be rejected outright instead.
+  assert.equal(isValidAssetId(' 12345 '), false);
+  assert.equal(isValidAssetId('12345 '), false);
+  assert.equal(isValidAssetId(' 12345'), false);
 });
 
 test('a raw JSON wire number near the safe-integer boundary can never become a DIFFERENT, wrong, in-range id (why number is rejected outright, not just range-checked)', () => {
@@ -186,4 +195,16 @@ test('route-level: out-of-range/malformed ids are rejected with 400 on the real 
   assert.equal(unwrapMissingIdRes.status, 400);
   const unwrapMissingIdBody = await unwrapMissingIdRes.json();
   assert.match(unwrapMissingIdBody.error, /wrappedTokenId/);
+
+  // A missing/malformed `items` array itself (no ids to even check) must
+  // also 400 before ensureConfigInitialized() network I/O, not just once it
+  // reaches handleUnwrap's own downstream check.
+  const unwrapNoItemsRes = await fetch(`${baseUrl}/unwrap`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ address: 'FAKEADDR' })
+  });
+  assert.equal(unwrapNoItemsRes.status, 400);
+  const unwrapNoItemsBody = await unwrapNoItemsRes.json();
+  assert.match(unwrapNoItemsBody.error, /items/);
 });
