@@ -104,6 +104,66 @@ test('single-pool-per-hop route: concrete enumeration is skipped and each pool p
   assert.equal(humbleFetches, 2, 'each distinct pool fetched once via the shared cache');
 });
 
+test('single-pool-per-hop route: concrete fallback runs when the split pass fails transiently', async (t) => {
+  // The split (poolOptions) pass makes a bounded number of pool-info fetch
+  // attempts and throws if they all fail (a failed fetch is never cached). The
+  // old code always ran the concrete pass afterward, which -- via a fresh fetch
+  // -- could still recover. This asserts we preserve that recovery: fail every
+  // attempt the split pass makes, then succeed, and confirm a quote is still
+  // returned via the concrete fallback (generateRouteCombinations invoked once).
+  let humbleAttempts = 0;
+  let genCombosCalls = 0;
+  const FAIL_UNTIL = 3; // number of fetch attempts the split pass makes for a 1-hop single pool
+  mockUtils(t);
+
+  t.mock.module('../lib/humbleswap.js', {
+    namedExports: {
+      getPoolInfo: async () => {
+        humbleAttempts += 1;
+        if (humbleAttempts <= FAIL_UNTIL) throw new Error('transient pool-info failure');
+        return { tokA: 100, tokB: 200, poolBals: { A: 1_000_000n, B: 1_000_000n }, protoInfo: { totFee: 30 } };
+      },
+      calculateOutputAmount: (amountIn) => { const a = BigInt(amountIn); return a > 0n ? a / 2n : 0n; },
+      resolveWrappedTokens: () => ({ inputWrapped: 100, outputWrapped: 200 }),
+      validateWrappedPair: () => true
+    }
+  });
+  t.mock.module('../lib/nomadex.js', {
+    namedExports: {
+      NOMADEX_FEE_SCALE: 10000n,
+      getPoolInfo: async () => { throw new Error('nomadex not used'); },
+      calculateOutputAmount: () => 0n
+    }
+  });
+  t.mock.module('../lib/config.js', {
+    namedExports: {
+      getPoolConfigById: () => null,
+      generateRouteCombinations: (route) => {
+        genCombosCalls += 1;
+        return [{ pools: route.poolOptions.map(opts => opts[0]), intermediateTokens: route.intermediateTokens, hops: route.hops }];
+      },
+      findMatchingPools: () => [],
+      findRoutes: () => [],
+      getDiscoveryStatus: () => null,
+      getUnderlyingForWrapped: () => null
+    }
+  });
+
+  const { findOptimalMultiHopRoute, createPoolInfoCache } = await importFreshQuotes();
+  const cache = createPoolInfoCache();
+
+  // A 1-hop single-pool route (1 -> 2).
+  const poolA = { poolId: 111, dex: 'humbleswap' };
+  const route = { poolOptions: [[poolA]], intermediateTokens: [], hops: 1, tokenSequence: [1, 2] };
+
+  const result = await findOptimalMultiHopRoute([route], 1, 2, '1000', 0.01, '', undefined, cache);
+
+  assert.ok(result, 'the concrete fallback recovered a quote after the split pass failed transiently');
+  assert.equal(result.quote.outputAmount, '500', '1000 / 2 via the recovered pool');
+  assert.equal(genCombosCalls, 1, 'the concrete fallback (generateRouteCombinations) ran exactly once');
+  assert.ok(humbleAttempts > FAIL_UNTIL, 'the pool was retried past the failing window');
+});
+
 test('multi-pool-per-hop route: concrete combinations ARE still enumerated', async (t) => {
   let genCombosCalls = 0;
   mockUtils(t);
