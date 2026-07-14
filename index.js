@@ -1,5 +1,6 @@
 import express from 'express';
 import cors from 'cors';
+import { rateLimit } from 'express-rate-limit';
 import algosdk from 'algosdk';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -35,9 +36,76 @@ getPlatformFeeConfig();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// --- CORS policy (TASK-26) ---
+//
+// This is a public, unauthenticated quote/unwrap API with no session cookies
+// or API keys, so a wide-open CORS default is an intentional public-API
+// choice, not an oversight — preserves the pre-existing `cors()` (allow-all)
+// behavior. CORS_ORIGINS (comma-separated) lets that be locked down to a
+// specific origin list purely via env, without a code change/deploy.
+const CORS_ORIGINS = (process.env.CORS_ORIGINS || '')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
+const corsOptions = CORS_ORIGINS.length === 0
+  ? { origin: '*' }
+  : {
+      // Reflects the request Origin only when it's in the configured
+      // allowlist; a request with no Origin header (curl, server-to-server)
+      // has no browser same-origin policy to enforce and is allowed through.
+      origin(origin, callback) {
+        if (!origin || CORS_ORIGINS.includes(origin)) {
+          return callback(null, true);
+        }
+        return callback(null, false);
+      }
+    };
+
+// Vercel puts the real client IP in X-Forwarded-For, added by exactly one
+// hop (Vercel's own edge) in front of the serverless function. Trusting only
+// that one hop (not `true`/the whole chain) means req.ip - and therefore the
+// per-IP rate limiter's key below - resolves to the real client IP, while a
+// client can't evade the limiter by appending its own fake XFF entries.
+app.set('trust proxy', 1);
+
+// --- Best-effort per-IP rate limiting (TASK-26) ---
+//
+// BEST-EFFORT ONLY on serverless: this uses express-rate-limit's default
+// in-memory MemoryStore, which is per-instance. Vercel cold-starts multiple
+// concurrent instances that each get their own counters (not shared, and
+// reset on every cold start), so this does NOT enforce a global per-IP cap -
+// it only raises the cost of abuse hitting a single warm instance. The
+// primary DoS lever is the route-combination fan-out cap
+// (MAX_ROUTE_COMBINATIONS, lib/config.js), which bounds the work ONE request
+// can do regardless of how many requests get through. A robust
+// cross-instance limiter (Vercel WAF / an Upstash-backed store) was
+// considered and deliberately deferred — it needs new infra/credentials,
+// which this task avoids (human decision, TASK-26). Documented limitation,
+// not a silent shim (CONVE-33).
+const RATE_LIMIT_WINDOW_MS = (() => {
+  const fromEnv = Number(process.env.RATE_LIMIT_WINDOW_MS);
+  return Number.isFinite(fromEnv) && fromEnv > 0 ? fromEnv : 60 * 1000; // 1 minute
+})();
+const RATE_LIMIT_MAX = (() => {
+  const fromEnv = Number(process.env.RATE_LIMIT_MAX);
+  return Number.isInteger(fromEnv) && fromEnv > 0 ? fromEnv : 60; // 60 req/window
+})();
+const apiRateLimiter = rateLimit({
+  windowMs: RATE_LIMIT_WINDOW_MS,
+  limit: RATE_LIMIT_MAX,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests, please try again later.' }
+});
+
 // Middleware
-app.use(cors());
+app.use(cors(corsOptions));
 app.use(express.json());
+// Applied to the fan-out-heavy endpoints specifically (see cap above for why
+// these two are the ones that matter); a global limiter would also be fine
+// but these are the actual amplification surface.
+app.use(['/quote', '/unwrap'], apiRateLimiter);
 
 // Serve static files from public directory
 app.use(express.static(path.join(__dirname, 'public')));

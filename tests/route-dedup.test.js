@@ -73,7 +73,9 @@ test('single-pool-per-hop route: concrete enumeration is skipped and each pool p
       findMatchingPools: () => [],
       findRoutes: () => [],
       getDiscoveryStatus: () => null,
-      getUnderlyingForWrapped: () => null
+      getUnderlyingForWrapped: () => null,
+      // TASK-26: lib/quotes.js now imports this alongside generateRouteCombinations.
+      MAX_ROUTE_COMBINATIONS: 10
     }
   });
 
@@ -145,7 +147,9 @@ test('single-pool-per-hop route: concrete fallback runs when the split pass fail
       findMatchingPools: () => [],
       findRoutes: () => [],
       getDiscoveryStatus: () => null,
-      getUnderlyingForWrapped: () => null
+      getUnderlyingForWrapped: () => null,
+      // TASK-26: lib/quotes.js now imports this alongside generateRouteCombinations.
+      MAX_ROUTE_COMBINATIONS: 10
     }
   });
 
@@ -194,7 +198,9 @@ test('multi-pool-per-hop route: concrete combinations ARE still enumerated', asy
       findMatchingPools: () => [],
       findRoutes: () => [],
       getDiscoveryStatus: () => null,
-      getUnderlyingForWrapped: () => null
+      getUnderlyingForWrapped: () => null,
+      // TASK-26: lib/quotes.js now imports this alongside generateRouteCombinations.
+      MAX_ROUTE_COMBINATIONS: 10
     }
   });
 
