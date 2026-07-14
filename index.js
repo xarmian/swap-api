@@ -14,6 +14,7 @@ import {
   getPoolInfo200 as getHumbleswapPoolInfo200
 } from './lib/humbleswap.js';
 import { getPlatformFeeConfig } from './lib/quotes.js';
+import { MAX_UNWRAP_GROUP_SIZE } from './lib/transactions.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -219,10 +220,6 @@ app.post('/quote', async (req, res) => {
   }
 });
 
-// Each unwrap item costs ~2 txns (unwrap + transfer), and an atomic group is
-// capped at 16 txns, so 8 items is the most that can ever fit in one group.
-const MAX_UNWRAP_ITEMS = 8;
-
 // POST /unwrap endpoint
 app.post('/unwrap', async (req, res) => {
   try {
@@ -245,11 +242,14 @@ app.post('/unwrap', async (req, res) => {
       return res.status(400).json({ error: 'items array is required and must be non-empty' });
     }
     // Cap items before any per-item validation/chain calls — an unbounded
-    // array would otherwise fan out N chain calls before an inevitable
-    // group-size failure (see MAX_UNWRAP_ITEMS above).
-    if (items.length > MAX_UNWRAP_ITEMS) {
+    // array would otherwise fan out N chain calls before hitting the same
+    // MAX_UNWRAP_GROUP_SIZE check that buildBatchUnwrapTransactions
+    // (lib/transactions.js) enforces downstream. Reuses that exported
+    // constant rather than a separate local number so the two limits can
+    // never drift apart.
+    if (items.length > MAX_UNWRAP_GROUP_SIZE) {
       return res.status(400).json({
-        error: `Too many items: at most ${MAX_UNWRAP_ITEMS} per unwrap request`
+        error: `Too many items: at most ${MAX_UNWRAP_GROUP_SIZE} per unwrap request`
       });
     }
     const badItemIndex = items.findIndex(

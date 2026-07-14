@@ -236,7 +236,7 @@ test('route-level: POST /quote with no request body returns a clean 400, not a 5
 
 // Remaining TASK-25 gaps: POST /quote's optional `address` must be validated
 // with algosdk.isValidAddress ONLY when provided, and POST /unwrap's `items`
-// must be capped at MAX_UNWRAP_ITEMS (8) before any per-item/network work.
+// must be capped at MAX_UNWRAP_GROUP_SIZE (16) before any per-item/network work.
 test('route-level: POST /quote rejects a malformed address, but only when one is actually provided', async (t) => {
   const server = app.listen(0);
   await new Promise((resolve) => server.once('listening', resolve));
@@ -333,12 +333,15 @@ test('route-level: POST /quote rejects a malformed address, but only when one is
   assert.match(validAddressBody.error, /slippageTolerance/);
 });
 
-test('route-level: POST /unwrap rejects more than MAX_UNWRAP_ITEMS items, but accepts exactly that many', async (t) => {
+test('route-level: POST /unwrap rejects more than MAX_UNWRAP_GROUP_SIZE items, but accepts exactly that many', async (t) => {
   const server = app.listen(0);
   await new Promise((resolve) => server.once('listening', resolve));
   t.after(() => new Promise((resolve) => server.close(resolve)));
   const baseUrl = `http://localhost:${server.address().port}`;
-  const MAX_UNWRAP_ITEMS = 8;
+  // Matches the authoritative limit exported from lib/transactions.js
+  // (buildBatchUnwrapTransactions) — one application-call txn per item,
+  // capped by the 16-txn atomic group limit.
+  const MAX_UNWRAP_GROUP_SIZE = 16;
   const validItem = { wrappedTokenId: '123', amount: '1' };
 
   const tooManyRes = await fetch(`${baseUrl}/unwrap`, {
@@ -346,20 +349,20 @@ test('route-level: POST /unwrap rejects more than MAX_UNWRAP_ITEMS items, but ac
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       address: 'FAKEADDR',
-      items: Array.from({ length: MAX_UNWRAP_ITEMS + 1 }, () => validItem)
+      items: Array.from({ length: MAX_UNWRAP_GROUP_SIZE + 1 }, () => validItem)
     })
   });
   assert.equal(tooManyRes.status, 400);
   const tooManyBody = await tooManyRes.json();
   assert.match(tooManyBody.error, /Too many items/);
-  assert.match(tooManyBody.error, /8/);
+  assert.match(tooManyBody.error, /16/);
 
-  // Exactly MAX_UNWRAP_ITEMS must NOT be rejected as "too many" — it should
-  // fall through to the next check (an invalid wrappedTokenId planted in the
-  // last item) instead.
+  // Exactly MAX_UNWRAP_GROUP_SIZE must NOT be rejected as "too many" — it
+  // should fall through to the next check (an invalid wrappedTokenId planted
+  // in the last item) instead.
   const OVER_LIMIT = '18014398509481984'; // 2^54, well above Number.MAX_SAFE_INTEGER
-  const exactlyMaxItems = Array.from({ length: MAX_UNWRAP_ITEMS }, () => validItem);
-  exactlyMaxItems[MAX_UNWRAP_ITEMS - 1] = { wrappedTokenId: OVER_LIMIT, amount: '1' };
+  const exactlyMaxItems = Array.from({ length: MAX_UNWRAP_GROUP_SIZE }, () => validItem);
+  exactlyMaxItems[MAX_UNWRAP_GROUP_SIZE - 1] = { wrappedTokenId: OVER_LIMIT, amount: '1' };
   const exactlyMaxRes = await fetch(`${baseUrl}/unwrap`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
