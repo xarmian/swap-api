@@ -415,7 +415,15 @@ app.use((err, req, res, next) => {
   if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
     return res.status(400).json({ error: 'Malformed JSON request body' });
   }
-  internalError(res, err, 'Unhandled error', { status: err.status || err.statusCode || 500 });
+  const status = err.status || err.statusCode || 500;
+  if (status < 500) {
+    // A framework/middleware-level 4xx (e.g. payload-too-large,
+    // unsupported-media-type) - err.message here is a controlled, safe
+    // description, not an internal/exception leak, so it is left intact.
+    // Only internal/500s are genericized (TASK-27).
+    return res.status(status).json({ error: err.message || 'Request error' });
+  }
+  internalError(res, err, 'Unhandled error', { status });
 });
 
 // Start server only when running directly (local development)
