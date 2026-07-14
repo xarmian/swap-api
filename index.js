@@ -122,13 +122,15 @@ const apiRateLimiter = rateLimit({
   message: { error: 'Too many requests, please try again later.' }
 });
 
-// Middleware
+// Middleware. Order matters: the rate limiter is mounted on the fan-out-heavy
+// endpoints BEFORE express.json() so a request counts against the per-IP quota
+// even when its body is malformed or oversized - otherwise a flood of
+// unparseable JSON would fail in the body parser without ever consuming the
+// limit, dodging it entirely. (These two endpoints are the actual amplification
+// surface; a global limiter would also be fine.)
 app.use(cors(corsOptions));
-app.use(express.json());
-// Applied to the fan-out-heavy endpoints specifically (see cap above for why
-// these two are the ones that matter); a global limiter would also be fine
-// but these are the actual amplification surface.
 app.use(['/quote', '/unwrap'], apiRateLimiter);
+app.use(express.json());
 
 // Serve static files from public directory
 app.use(express.static(path.join(__dirname, 'public')));

@@ -78,6 +78,25 @@ test('rate limiter honors RATE_LIMIT_MAX/RATE_LIMIT_WINDOW_MS and returns 429 on
   assert.equal(third.status, 429, 'the 3rd request within the window exceeds RATE_LIMIT_MAX=2');
 });
 
+test('malformed-JSON requests still consume the rate-limit quota (limiter runs before the body parser)', async (t) => {
+  // The limiter is mounted ahead of express.json() so a flood of unparseable
+  // JSON cannot dodge the per-IP quota by erroring in the parser first. With a
+  // cap of 2, the 3rd malformed request is 429'd, not 400'd.
+  const app = await withEnv({ RATE_LIMIT_WINDOW_MS: '60000', RATE_LIMIT_MAX: '2' }, () => importFreshIndex());
+  const server = app.listen(0);
+  await new Promise((resolve) => server.once('listening', resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const baseUrl = `http://localhost:${server.address().port}`;
+
+  const bad = { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{ this is not json' };
+  const first = await fetch(`${baseUrl}/quote`, bad);
+  assert.equal(first.status, 400); // malformed JSON, under the cap
+  const second = await fetch(`${baseUrl}/quote`, bad);
+  assert.equal(second.status, 400);
+  const third = await fetch(`${baseUrl}/quote`, bad);
+  assert.equal(third.status, 429, 'the 3rd malformed request is rate-limited before the parser, not just 400');
+});
+
 test('an invalid RATE_LIMIT_MAX/RATE_LIMIT_WINDOW_MS falls back to the documented defaults rather than disabling the limiter', async (t) => {
   const app = await withEnv({ RATE_LIMIT_WINDOW_MS: 'garbage', RATE_LIMIT_MAX: '-1' }, () => importFreshIndex());
   const server = app.listen(0);

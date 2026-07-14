@@ -399,3 +399,69 @@ test('per-request budget: the failure-only single-pool fallback is skipped once 
   // routeB fallback is skipped rather than adding uncapped concrete retries.
   assert.equal(genCombosCalls, 1, 'the fallback respects the exhausted shared budget and does not re-enumerate');
 });
+
+test('per-request budget: an EARLIER deferred route reserves its fallback slot in route order so a LATER route cannot starve it', async (t) => {
+  // Budget = 1, route order = [singlePoolEarly, multiPoolLate]. The earlier
+  // single-pool route reserves the one slot up front (in route order); the
+  // later multi-pool route therefore gets no concrete enumeration, and the
+  // earlier route's transient-failure fallback still runs. Without route-ordered
+  // reservation the later route would consume the slot during construction and
+  // starve the earlier route's recovery — the round-3 inconsistency.
+  const genCombosFor = [];
+  mockUtils(t);
+  t.mock.module('../lib/humbleswap.js', {
+    namedExports: {
+      // routeEarly's pools (555/666) always throw; routeLate's (111/112/222)
+      // succeed. We only need to prove the fallback was ATTEMPTED (not starved),
+      // so recovery success itself is out of scope here.
+      getPoolInfo: async (poolId) => {
+        if (Number(poolId) === 555 || Number(poolId) === 666) throw new Error('transient failure (routeEarly)');
+        return { tokA: 100, tokB: 200, poolBals: { A: 1_000_000n, B: 1_000_000n }, protoInfo: { totFee: 30 } };
+      },
+      calculateOutputAmount: (amountIn) => { const a = BigInt(amountIn); return a > 0n ? a / 2n : 0n; },
+      resolveWrappedTokens: () => ({ inputWrapped: 100, outputWrapped: 200 }),
+      validateWrappedPair: () => true
+    }
+  });
+  t.mock.module('../lib/nomadex.js', {
+    namedExports: {
+      NOMADEX_FEE_SCALE: 10000n,
+      getPoolInfo: async () => { throw new Error('nomadex not used'); },
+      calculateOutputAmount: () => 0n
+    }
+  });
+  t.mock.module('../lib/config.js', {
+    namedExports: {
+      getPoolConfigById: () => null,
+      generateRouteCombinations: (route, maxArg) => {
+        genCombosFor.push(route.poolOptions[0][0].poolId);
+        const total = route.poolOptions.reduce((n, opts) => n * opts.length, 1);
+        return Array.from({ length: Math.min(maxArg, total) }, (_, i) => ({
+          pools: [route.poolOptions[0][i % route.poolOptions[0].length], route.poolOptions[1][0]],
+          intermediateTokens: route.intermediateTokens,
+          hops: route.hops
+        }));
+      },
+      findMatchingPools: () => [],
+      findRoutes: () => [],
+      getDiscoveryStatus: () => null,
+      getUnderlyingForWrapped: () => null,
+      MAX_ROUTE_COMBINATIONS: 1
+    }
+  });
+
+  const { findOptimalMultiHopRoute, createPoolInfoCache } = await importFreshQuotes();
+  const cache = createPoolInfoCache();
+
+  const routeEarly = {
+    poolOptions: [[{ poolId: 555, dex: 'humbleswap' }], [{ poolId: 666, dex: 'humbleswap' }]],
+    intermediateTokens: [2], hops: 2, tokenSequence: [1, 2, 3]
+  };
+  const routeLate = makeMultiPoolRoute([111, 112], 222);
+  const result = await findOptimalMultiHopRoute([routeEarly, routeLate], 1, 3, '1000', 0.01, '', 1, cache);
+
+  assert.ok(result, 'routeLate still produced a valid quote');
+  // The ONLY concrete enumeration is routeEarly's reserved fallback (pool 555);
+  // routeLate never enumerates (its slot was reserved by the earlier route).
+  assert.deepEqual(genCombosFor, [555], 'the earlier route\'s reserved fallback runs; the later route does not consume the slot');
+});
