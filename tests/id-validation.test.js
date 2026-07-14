@@ -277,8 +277,8 @@ test('route-level: POST /quote rejects a malformed address, but only when one is
   assert.match(noAddressBody.error, /slippageTolerance/);
   assert.doesNotMatch(noAddressBody.error, /address/);
 
-  // An empty-string `address` is treated the same as absent (not a garbage
-  // value to reject) — same fall-through-to-slippage behavior as above.
+  // An explicit empty-string `address` is a PROVIDED value, not an omission —
+  // it must be rejected as invalid, not silently treated as "no address".
   const emptyAddressRes = await fetch(`${baseUrl}/quote`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -292,7 +292,26 @@ test('route-level: POST /quote rejects a malformed address, but only when one is
   });
   assert.equal(emptyAddressRes.status, 400);
   const emptyAddressBody = await emptyAddressRes.json();
-  assert.match(emptyAddressBody.error, /slippageTolerance/);
+  assert.match(emptyAddressBody.error, /Invalid address/);
+
+  // An explicit `address: null` is treated the same as omitted (matching the
+  // existing poolId undefined/null precedent just above it in index.js) —
+  // falls through to the next check instead of 400ing on address.
+  const nullAddressRes = await fetch(`${baseUrl}/quote`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      inputToken: '0',
+      outputToken: '1',
+      amount: '1000000',
+      address: null,
+      slippageTolerance: 999
+    })
+  });
+  assert.equal(nullAddressRes.status, 400);
+  const nullAddressBody = await nullAddressRes.json();
+  assert.match(nullAddressBody.error, /slippageTolerance/);
+  assert.doesNotMatch(nullAddressBody.error, /address/);
 
   // A syntactically valid Algorand/Voi address must pass the address check
   // and fall through the same way (proving valid addresses aren't rejected).

@@ -136,9 +136,14 @@ app.post('/quote', async (req, res) => {
       }, getDiscoveryStatus()));
     }
 
-    // address is optional (see comment above) — only validate it when the
-    // caller actually provided one, so an omitted address never 400s here.
-    if (address !== undefined && address !== null && address !== '' && !algosdk.isValidAddress(address)) {
+    // address is optional (see comment above) — only skip validation when the
+    // caller didn't provide one at all. undefined/null both mean "omitted"
+    // (matching the poolId undefined/null check just above); anything else,
+    // including an explicit empty string, is a provided value and must be a
+    // valid address — reject it outright rather than silently treating it as
+    // "no address" (CONVE-35: never coerce ambiguous input into something
+    // that only looks like the absent case).
+    if (address !== undefined && address !== null && !algosdk.isValidAddress(address)) {
       return res.status(400).json(withDiscoveryWarning({
         error: 'Invalid address: must be a valid Algorand/Voi address'
       }, getDiscoveryStatus()));
