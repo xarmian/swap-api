@@ -137,13 +137,15 @@ app.post('/quote', async (req, res) => {
     }
 
     // address is optional (see comment above) — only skip validation when the
-    // caller didn't provide one at all. undefined/null both mean "omitted"
-    // (matching the poolId undefined/null check just above); anything else,
-    // including an explicit empty string, is a provided value and must be a
+    // field is truly omitted (undefined). Any other provided value, including
+    // an explicit null or empty string, is a provided value and must be a
     // valid address — reject it outright rather than silently treating it as
     // "no address" (CONVE-35: never coerce ambiguous input into something
-    // that only looks like the absent case).
-    if (address !== undefined && address !== null && !algosdk.isValidAddress(address)) {
+    // that only looks like the absent case). Unlike poolId (which treats
+    // null the same as undefined), address deliberately does NOT extend that
+    // leniency to null: a caller has no legitimate reason to send an explicit
+    // null address instead of just omitting the key.
+    if (address !== undefined && !algosdk.isValidAddress(address)) {
       return res.status(400).json(withDiscoveryWarning({
         error: 'Invalid address: must be a valid Algorand/Voi address'
       }, getDiscoveryStatus()));

@@ -294,9 +294,11 @@ test('route-level: POST /quote rejects a malformed address, but only when one is
   const emptyAddressBody = await emptyAddressRes.json();
   assert.match(emptyAddressBody.error, /Invalid address/);
 
-  // An explicit `address: null` is treated the same as omitted (matching the
-  // existing poolId undefined/null precedent just above it in index.js) —
-  // falls through to the next check instead of 400ing on address.
+  // An explicit `address: null` is a PROVIDED value, not an omission (only
+  // an actually-missing key skips validation) — it must be rejected too,
+  // unlike poolId's undefined/null leniency which address deliberately does
+  // not copy (a caller has no legitimate reason to send an explicit null
+  // address instead of just omitting the key).
   const nullAddressRes = await fetch(`${baseUrl}/quote`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -310,8 +312,7 @@ test('route-level: POST /quote rejects a malformed address, but only when one is
   });
   assert.equal(nullAddressRes.status, 400);
   const nullAddressBody = await nullAddressRes.json();
-  assert.match(nullAddressBody.error, /slippageTolerance/);
-  assert.doesNotMatch(nullAddressBody.error, /address/);
+  assert.match(nullAddressBody.error, /Invalid address/);
 
   // A syntactically valid Algorand/Voi address must pass the address check
   // and fall through the same way (proving valid addresses aren't rejected).
