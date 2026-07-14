@@ -233,3 +233,143 @@ test('route-level: POST /quote with no request body returns a clean 400, not a 5
   const emptyJsonBody = await emptyJsonRes.json();
   assert.match(emptyJsonBody.error, /Missing required fields/);
 });
+
+// Remaining TASK-25 gaps: POST /quote's optional `address` must be validated
+// with algosdk.isValidAddress ONLY when provided, and POST /unwrap's `items`
+// must be capped at MAX_UNWRAP_GROUP_SIZE (16) before any per-item/network work.
+test('route-level: POST /quote rejects a malformed address, but only when one is actually provided', async (t) => {
+  const server = app.listen(0);
+  await new Promise((resolve) => server.once('listening', resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const baseUrl = `http://localhost:${server.address().port}`;
+
+  // A well-formed request with a garbage `address` must 400 specifically on
+  // the address, before ensureConfigInitialized() network I/O.
+  const badAddressRes = await fetch(`${baseUrl}/quote`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      inputToken: '0',
+      outputToken: '1',
+      amount: '1000000',
+      address: 'not-a-valid-address'
+    })
+  });
+  assert.equal(badAddressRes.status, 400);
+  const badAddressBody = await badAddressRes.json();
+  assert.match(badAddressBody.error, /Invalid address/);
+
+  // Omitting `address` entirely must NOT trip the address check — the
+  // request should fall through to the NEXT validation step (an invalid
+  // slippageTolerance here) rather than 400 on address.
+  const noAddressRes = await fetch(`${baseUrl}/quote`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      inputToken: '0',
+      outputToken: '1',
+      amount: '1000000',
+      slippageTolerance: 999
+    })
+  });
+  assert.equal(noAddressRes.status, 400);
+  const noAddressBody = await noAddressRes.json();
+  assert.match(noAddressBody.error, /slippageTolerance/);
+  assert.doesNotMatch(noAddressBody.error, /address/);
+
+  // An explicit empty-string `address` is a PROVIDED value, not an omission —
+  // it must be rejected as invalid, not silently treated as "no address".
+  const emptyAddressRes = await fetch(`${baseUrl}/quote`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      inputToken: '0',
+      outputToken: '1',
+      amount: '1000000',
+      address: '',
+      slippageTolerance: 999
+    })
+  });
+  assert.equal(emptyAddressRes.status, 400);
+  const emptyAddressBody = await emptyAddressRes.json();
+  assert.match(emptyAddressBody.error, /Invalid address/);
+
+  // An explicit `address: null` is a PROVIDED value, not an omission (only
+  // an actually-missing key skips validation) — it must be rejected too,
+  // unlike poolId's undefined/null leniency which address deliberately does
+  // not copy (a caller has no legitimate reason to send an explicit null
+  // address instead of just omitting the key).
+  const nullAddressRes = await fetch(`${baseUrl}/quote`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      inputToken: '0',
+      outputToken: '1',
+      amount: '1000000',
+      address: null,
+      slippageTolerance: 999
+    })
+  });
+  assert.equal(nullAddressRes.status, 400);
+  const nullAddressBody = await nullAddressRes.json();
+  assert.match(nullAddressBody.error, /Invalid address/);
+
+  // A syntactically valid Algorand/Voi address must pass the address check
+  // and fall through the same way (proving valid addresses aren't rejected).
+  const validAddress = 'AHEUDLMXNBMH3Y6WH5YWREIRJLN5S7SBANXJG24UESC3GT7LEXQ53P5GGA';
+  const validAddressRes = await fetch(`${baseUrl}/quote`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      inputToken: '0',
+      outputToken: '1',
+      amount: '1000000',
+      address: validAddress,
+      slippageTolerance: 999
+    })
+  });
+  assert.equal(validAddressRes.status, 400);
+  const validAddressBody = await validAddressRes.json();
+  assert.match(validAddressBody.error, /slippageTolerance/);
+});
+
+test('route-level: POST /unwrap rejects more than MAX_UNWRAP_GROUP_SIZE items, but accepts exactly that many', async (t) => {
+  const server = app.listen(0);
+  await new Promise((resolve) => server.once('listening', resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const baseUrl = `http://localhost:${server.address().port}`;
+  // Matches the authoritative limit exported from lib/transactions.js
+  // (buildBatchUnwrapTransactions) — one application-call txn per item,
+  // capped by the 16-txn atomic group limit.
+  const MAX_UNWRAP_GROUP_SIZE = 16;
+  const validItem = { wrappedTokenId: '123', amount: '1' };
+
+  const tooManyRes = await fetch(`${baseUrl}/unwrap`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      address: 'FAKEADDR',
+      items: Array.from({ length: MAX_UNWRAP_GROUP_SIZE + 1 }, () => validItem)
+    })
+  });
+  assert.equal(tooManyRes.status, 400);
+  const tooManyBody = await tooManyRes.json();
+  assert.match(tooManyBody.error, /Too many items/);
+  assert.match(tooManyBody.error, /16/);
+
+  // Exactly MAX_UNWRAP_GROUP_SIZE must NOT be rejected as "too many" — it
+  // should fall through to the next check (an invalid wrappedTokenId planted
+  // in the last item) instead.
+  const OVER_LIMIT = '18014398509481984'; // 2^54, well above Number.MAX_SAFE_INTEGER
+  const exactlyMaxItems = Array.from({ length: MAX_UNWRAP_GROUP_SIZE }, () => validItem);
+  exactlyMaxItems[MAX_UNWRAP_GROUP_SIZE - 1] = { wrappedTokenId: OVER_LIMIT, amount: '1' };
+  const exactlyMaxRes = await fetch(`${baseUrl}/unwrap`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ address: 'FAKEADDR', items: exactlyMaxItems })
+  });
+  assert.equal(exactlyMaxRes.status, 400);
+  const exactlyMaxBody = await exactlyMaxRes.json();
+  assert.match(exactlyMaxBody.error, /wrappedTokenId/);
+  assert.doesNotMatch(exactlyMaxBody.error, /Too many/);
+});

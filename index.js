@@ -1,5 +1,6 @@
 import express from 'express';
 import cors from 'cors';
+import algosdk from 'algosdk';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { handleQuote, handleUnwrap, withDiscoveryWarning } from './lib/handlers.js';
@@ -13,6 +14,7 @@ import {
   getPoolInfo200 as getHumbleswapPoolInfo200
 } from './lib/humbleswap.js';
 import { getPlatformFeeConfig } from './lib/quotes.js';
+import { MAX_UNWRAP_GROUP_SIZE } from './lib/transactions.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -135,6 +137,21 @@ app.post('/quote', async (req, res) => {
       }, getDiscoveryStatus()));
     }
 
+    // address is optional (see comment above) — only skip validation when the
+    // field is truly omitted (undefined). Any other provided value, including
+    // an explicit null or empty string, is a provided value and must be a
+    // valid address — reject it outright rather than silently treating it as
+    // "no address" (CONVE-35: never coerce ambiguous input into something
+    // that only looks like the absent case). Unlike poolId (which treats
+    // null the same as undefined), address deliberately does NOT extend that
+    // leniency to null: a caller has no legitimate reason to send an explicit
+    // null address instead of just omitting the key.
+    if (address !== undefined && !algosdk.isValidAddress(address)) {
+      return res.status(400).json(withDiscoveryWarning({
+        error: 'Invalid address: must be a valid Algorand/Voi address'
+      }, getDiscoveryStatus()));
+    }
+
     // Validate amount is a well-formed positive integer STRING in base units,
     // matching the documented API contract (README: `amount` is a string),
     // before it reaches BigInt() deep in the quote engine. A malformed value
@@ -223,6 +240,17 @@ app.post('/unwrap', async (req, res) => {
     const { items } = req.body || {};
     if (!Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ error: 'items array is required and must be non-empty' });
+    }
+    // Cap items before any per-item validation/chain calls — an unbounded
+    // array would otherwise fan out N chain calls before hitting the same
+    // MAX_UNWRAP_GROUP_SIZE check that buildBatchUnwrapTransactions
+    // (lib/transactions.js) enforces downstream. Reuses that exported
+    // constant rather than a separate local number so the two limits can
+    // never drift apart.
+    if (items.length > MAX_UNWRAP_GROUP_SIZE) {
+      return res.status(400).json({
+        error: `Too many items: at most ${MAX_UNWRAP_GROUP_SIZE} per unwrap request`
+      });
     }
     const badItemIndex = items.findIndex(
       (item) => !item || !isValidAssetId(item.wrappedTokenId)
