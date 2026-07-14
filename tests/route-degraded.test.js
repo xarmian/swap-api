@@ -66,7 +66,9 @@ function mockDeps(t, getFailingPoolInfo) {
       findMatchingPools: () => [],
       findRoutes: () => [],
       getDiscoveryStatus: () => null,
-      getUnderlyingForWrapped: () => null
+      getUnderlyingForWrapped: () => null,
+      // TASK-26: lib/quotes.js now imports this alongside generateRouteCombinations.
+      MAX_ROUTE_COMBINATIONS: 10
     }
   });
 

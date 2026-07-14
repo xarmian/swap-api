@@ -103,7 +103,9 @@ test('direct match: only hops>1 routes reach findOptimalMultiHopRoute; 1-hop dup
       findMatchingPools: () => [{ poolId: 111, dex: 'humbleswap' }],
       findRoutes: () => [oneHop, twoHop],
       getDiscoveryStatus: () => null,
-      getUnderlyingForWrapped: () => null
+      getUnderlyingForWrapped: () => null,
+      // TASK-26: lib/handlers.js now imports this alongside the other config exports.
+      MAX_ROUTE_COMBINATIONS: 10
     }
   });
 
@@ -146,7 +148,9 @@ test('direct match with only 1-hop routes: findOptimalMultiHopRoute is never cal
       findMatchingPools: () => [{ poolId: 111, dex: 'humbleswap' }],
       findRoutes: () => [oneHopA, oneHopB],
       getDiscoveryStatus: () => null,
-      getUnderlyingForWrapped: () => null
+      getUnderlyingForWrapped: () => null,
+      // TASK-26: lib/handlers.js now imports this alongside the other config exports.
+      MAX_ROUTE_COMBINATIONS: 10
     }
   });
 
@@ -192,7 +196,9 @@ test('max platform fee (feeBps=10000 consumes the whole gain): 1-hop routes are 
       findMatchingPools: () => [{ poolId: 111, dex: 'humbleswap' }],
       findRoutes: () => [oneHop],
       getDiscoveryStatus: () => null,
-      getUnderlyingForWrapped: () => null
+      getUnderlyingForWrapped: () => null,
+      // TASK-26: lib/handlers.js now imports this alongside the other config exports.
+      MAX_ROUTE_COMBINATIONS: 10
     }
   });
 

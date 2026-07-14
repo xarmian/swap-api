@@ -302,6 +302,7 @@ The API returns appropriate HTTP status codes:
 
 - `200` - Success
 - `400` - Bad request (missing or invalid parameters)
+- `429` - Too many requests (per-IP rate limit on `/quote`/`/unwrap` — best-effort, see `RATE_LIMIT_WINDOW_MS`/`RATE_LIMIT_MAX` in `.env.example`)
 - `500` - Internal server error (pool info fetch failed, transaction generation failed, etc.)
 
 Error responses include an `error` field with a description:
@@ -318,6 +319,7 @@ Error responses include an `error` field with a description:
 - `ulujs` - Algorand smart contract interaction library
 - `algosdk@^2.11.0` - Algorand JavaScript SDK (v2.11.x for ulujs compatibility)
 - `cors` - CORS middleware
+- `express-rate-limit` - Best-effort per-IP rate limiting
 - `dotenv` - Environment variable management
 
 ## License

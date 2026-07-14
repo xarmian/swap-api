@@ -73,7 +73,9 @@ test('single-pool-per-hop route: concrete enumeration is skipped and each pool p
       findMatchingPools: () => [],
       findRoutes: () => [],
       getDiscoveryStatus: () => null,
-      getUnderlyingForWrapped: () => null
+      getUnderlyingForWrapped: () => null,
+      // TASK-26: lib/quotes.js now imports this alongside generateRouteCombinations.
+      MAX_ROUTE_COMBINATIONS: 10
     }
   });
 
@@ -145,7 +147,9 @@ test('single-pool-per-hop route: concrete fallback runs when the split pass fail
       findMatchingPools: () => [],
       findRoutes: () => [],
       getDiscoveryStatus: () => null,
-      getUnderlyingForWrapped: () => null
+      getUnderlyingForWrapped: () => null,
+      // TASK-26: lib/quotes.js now imports this alongside generateRouteCombinations.
+      MAX_ROUTE_COMBINATIONS: 10
     }
   });
 
@@ -194,7 +198,9 @@ test('multi-pool-per-hop route: concrete combinations ARE still enumerated', asy
       findMatchingPools: () => [],
       findRoutes: () => [],
       getDiscoveryStatus: () => null,
-      getUnderlyingForWrapped: () => null
+      getUnderlyingForWrapped: () => null,
+      // TASK-26: lib/quotes.js now imports this alongside generateRouteCombinations.
+      MAX_ROUTE_COMBINATIONS: 10
     }
   });
 
@@ -216,4 +222,246 @@ test('multi-pool-per-hop route: concrete combinations ARE still enumerated', asy
 
   assert.ok(result, 'a route was selected');
   assert.equal(genCombosCalls, 1, 'generateRouteCombinations IS called for a multi-pool-per-hop route');
+});
+
+// TASK-26: the fan-out cap is a PER-REQUEST budget shared across every route,
+// not per-route. These two tests mock generateRouteCombinations to record the
+// (shrinking) maxCombinations budget it is handed per route and to return a
+// controllable number of concrete combinations, proving the total concrete
+// candidates across all routes can never exceed the cap.
+function makeMultiPoolRoute(hop1Ids, hop2Id) {
+  return {
+    poolOptions: [hop1Ids.map((id) => ({ poolId: id, dex: 'humbleswap' })), [{ poolId: hop2Id, dex: 'humbleswap' }]],
+    intermediateTokens: [2],
+    hops: 2,
+    tokenSequence: [1, 2, 3]
+  };
+}
+
+function mockHumbleAndNomadexForMultiHop(t) {
+  t.mock.module('../lib/humbleswap.js', {
+    namedExports: {
+      getPoolInfo: async () => ({ tokA: 100, tokB: 200, poolBals: { A: 1_000_000n, B: 1_000_000n }, protoInfo: { totFee: 30 } }),
+      calculateOutputAmount: (amountIn) => { const a = BigInt(amountIn); return a > 0n ? a / 2n : 0n; },
+      resolveWrappedTokens: () => ({ inputWrapped: 100, outputWrapped: 200 }),
+      validateWrappedPair: () => true
+    }
+  });
+  t.mock.module('../lib/nomadex.js', {
+    namedExports: {
+      NOMADEX_FEE_SCALE: 10000n,
+      getPoolInfo: async () => { throw new Error('nomadex not used'); },
+      calculateOutputAmount: () => 0n
+    }
+  });
+}
+
+test('per-request budget: a route that consumes the whole cap leaves NO concrete budget for later routes', async (t) => {
+  const genCombosArgs = [];
+  mockUtils(t);
+  mockHumbleAndNomadexForMultiHop(t);
+  t.mock.module('../lib/config.js', {
+    namedExports: {
+      getPoolConfigById: () => null,
+      // Returns exactly the budget it is handed (up to 10 available), so the
+      // first route swallows the whole MAX_ROUTE_COMBINATIONS budget.
+      generateRouteCombinations: (route, maxArg) => {
+        genCombosArgs.push(maxArg);
+        return Array.from({ length: Math.min(maxArg, 10) }, (_, i) => ({
+          pools: [route.poolOptions[0][i % route.poolOptions[0].length], route.poolOptions[1][0]],
+          intermediateTokens: route.intermediateTokens,
+          hops: route.hops
+        }));
+      },
+      findMatchingPools: () => [],
+      findRoutes: () => [],
+      getDiscoveryStatus: () => null,
+      getUnderlyingForWrapped: () => null,
+      MAX_ROUTE_COMBINATIONS: 10
+    }
+  });
+
+  const { findOptimalMultiHopRoute, createPoolInfoCache } = await importFreshQuotes();
+  const cache = createPoolInfoCache();
+
+  const routeA = makeMultiPoolRoute([111, 112], 222);
+  const routeB = makeMultiPoolRoute([333, 334], 444);
+  const result = await findOptimalMultiHopRoute([routeA, routeB], 1, 3, '1000', 0.01, '', 10, cache);
+
+  assert.ok(result, 'a route was selected');
+  // Route A got the full budget (10) and consumed it; route B's concrete pass
+  // is skipped entirely (budget exhausted), so generateRouteCombinations runs
+  // exactly once. Without the shared budget it would run for BOTH routes.
+  assert.deepEqual(genCombosArgs, [10], 'only the first route enumerates concrete combinations; the cap bounds the per-request total');
+});
+
+test('per-request budget: the remaining budget shrinks as it is handed to each successive route', async (t) => {
+  const genCombosArgs = [];
+  mockUtils(t);
+  mockHumbleAndNomadexForMultiHop(t);
+  t.mock.module('../lib/config.js', {
+    namedExports: {
+      getPoolConfigById: () => null,
+      // Each route returns only 3 concrete combinations, so the budget is NOT
+      // exhausted by the first route and the second route runs with a REDUCED
+      // budget — pinning that the remaining budget (not the full cap) is threaded.
+      generateRouteCombinations: (route, maxArg) => {
+        genCombosArgs.push(maxArg);
+        return Array.from({ length: Math.min(maxArg, 3) }, (_, i) => ({
+          pools: [route.poolOptions[0][i % route.poolOptions[0].length], route.poolOptions[1][0]],
+          intermediateTokens: route.intermediateTokens,
+          hops: route.hops
+        }));
+      },
+      findMatchingPools: () => [],
+      findRoutes: () => [],
+      getDiscoveryStatus: () => null,
+      getUnderlyingForWrapped: () => null,
+      MAX_ROUTE_COMBINATIONS: 10
+    }
+  });
+
+  const { findOptimalMultiHopRoute, createPoolInfoCache } = await importFreshQuotes();
+  const cache = createPoolInfoCache();
+
+  const routeA = makeMultiPoolRoute([111, 112], 222);
+  const routeB = makeMultiPoolRoute([333, 334], 444);
+  const result = await findOptimalMultiHopRoute([routeA, routeB], 1, 3, '1000', 0.01, '', 10, cache);
+
+  assert.ok(result, 'a route was selected');
+  // Route A: budget 10 -> returns 3 -> budget 7. Route B: budget 7 -> returns 3.
+  assert.deepEqual(genCombosArgs, [10, 7], 'the shared budget decreases by the concrete count consumed by each prior route');
+});
+
+test('per-request budget: the failure-only single-pool fallback is skipped once the budget is exhausted (does not bypass the cap)', async (t) => {
+  let genCombosCalls = 0;
+  mockUtils(t);
+
+  // humbleswap: routeB's single pools (555/666) always throw, forcing routeB's
+  // split (poolOptions) candidate to fail and reach the concrete FALLBACK path;
+  // routeA's pools (111/112/222) succeed.
+  t.mock.module('../lib/humbleswap.js', {
+    namedExports: {
+      getPoolInfo: async (poolId) => {
+        if (Number(poolId) === 555 || Number(poolId) === 666) throw new Error('transient failure (routeB)');
+        return { tokA: 100, tokB: 200, poolBals: { A: 1_000_000n, B: 1_000_000n }, protoInfo: { totFee: 30 } };
+      },
+      calculateOutputAmount: (amountIn) => { const a = BigInt(amountIn); return a > 0n ? a / 2n : 0n; },
+      resolveWrappedTokens: () => ({ inputWrapped: 100, outputWrapped: 200 }),
+      validateWrappedPair: () => true
+    }
+  });
+  t.mock.module('../lib/nomadex.js', {
+    namedExports: {
+      NOMADEX_FEE_SCALE: 10000n,
+      getPoolInfo: async () => { throw new Error('nomadex not used'); },
+      calculateOutputAmount: () => 0n
+    }
+  });
+  t.mock.module('../lib/config.js', {
+    namedExports: {
+      getPoolConfigById: () => null,
+      generateRouteCombinations: (route, maxArg) => {
+        genCombosCalls += 1;
+        return Array.from({ length: Math.min(maxArg, 10) }, (_, i) => ({
+          pools: [route.poolOptions[0][i % route.poolOptions[0].length], route.poolOptions[1][0]],
+          intermediateTokens: route.intermediateTokens,
+          hops: route.hops
+        }));
+      },
+      findMatchingPools: () => [],
+      findRoutes: () => [],
+      getDiscoveryStatus: () => null,
+      getUnderlyingForWrapped: () => null,
+      MAX_ROUTE_COMBINATIONS: 10
+    }
+  });
+
+  const { findOptimalMultiHopRoute, createPoolInfoCache } = await importFreshQuotes();
+  const cache = createPoolInfoCache();
+
+  // routeA is multi-pool-per-hop: its up-front concrete enumeration returns 10
+  // combinations and exhausts the whole budget. routeB is single-pool-per-hop
+  // (deferred), and its split pass fails transiently, so WITHOUT the budget
+  // guard the fallback would call generateRouteCombinations a SECOND time and
+  // add concrete retries beyond the cap.
+  const routeA = makeMultiPoolRoute([111, 112], 222);
+  const routeB = {
+    poolOptions: [[{ poolId: 555, dex: 'humbleswap' }], [{ poolId: 666, dex: 'humbleswap' }]],
+    intermediateTokens: [2],
+    hops: 2,
+    tokenSequence: [1, 2, 3]
+  };
+  const result = await findOptimalMultiHopRoute([routeA, routeB], 1, 3, '1000', 0.01, '', 10, cache);
+
+  assert.ok(result, 'routeA still produced a valid quote');
+  // generateRouteCombinations runs exactly ONCE (routeA). The budget-exhausted
+  // routeB fallback is skipped rather than adding uncapped concrete retries.
+  assert.equal(genCombosCalls, 1, 'the fallback respects the exhausted shared budget and does not re-enumerate');
+});
+
+test('per-request budget: an EARLIER deferred route reserves its fallback slot in route order so a LATER route cannot starve it', async (t) => {
+  // Budget = 1, route order = [singlePoolEarly, multiPoolLate]. The earlier
+  // single-pool route reserves the one slot up front (in route order); the
+  // later multi-pool route therefore gets no concrete enumeration, and the
+  // earlier route's transient-failure fallback still runs. Without route-ordered
+  // reservation the later route would consume the slot during construction and
+  // starve the earlier route's recovery — the round-3 inconsistency.
+  const genCombosFor = [];
+  mockUtils(t);
+  t.mock.module('../lib/humbleswap.js', {
+    namedExports: {
+      // routeEarly's pools (555/666) always throw; routeLate's (111/112/222)
+      // succeed. We only need to prove the fallback was ATTEMPTED (not starved),
+      // so recovery success itself is out of scope here.
+      getPoolInfo: async (poolId) => {
+        if (Number(poolId) === 555 || Number(poolId) === 666) throw new Error('transient failure (routeEarly)');
+        return { tokA: 100, tokB: 200, poolBals: { A: 1_000_000n, B: 1_000_000n }, protoInfo: { totFee: 30 } };
+      },
+      calculateOutputAmount: (amountIn) => { const a = BigInt(amountIn); return a > 0n ? a / 2n : 0n; },
+      resolveWrappedTokens: () => ({ inputWrapped: 100, outputWrapped: 200 }),
+      validateWrappedPair: () => true
+    }
+  });
+  t.mock.module('../lib/nomadex.js', {
+    namedExports: {
+      NOMADEX_FEE_SCALE: 10000n,
+      getPoolInfo: async () => { throw new Error('nomadex not used'); },
+      calculateOutputAmount: () => 0n
+    }
+  });
+  t.mock.module('../lib/config.js', {
+    namedExports: {
+      getPoolConfigById: () => null,
+      generateRouteCombinations: (route, maxArg) => {
+        genCombosFor.push(route.poolOptions[0][0].poolId);
+        const total = route.poolOptions.reduce((n, opts) => n * opts.length, 1);
+        return Array.from({ length: Math.min(maxArg, total) }, (_, i) => ({
+          pools: [route.poolOptions[0][i % route.poolOptions[0].length], route.poolOptions[1][0]],
+          intermediateTokens: route.intermediateTokens,
+          hops: route.hops
+        }));
+      },
+      findMatchingPools: () => [],
+      findRoutes: () => [],
+      getDiscoveryStatus: () => null,
+      getUnderlyingForWrapped: () => null,
+      MAX_ROUTE_COMBINATIONS: 1
+    }
+  });
+
+  const { findOptimalMultiHopRoute, createPoolInfoCache } = await importFreshQuotes();
+  const cache = createPoolInfoCache();
+
+  const routeEarly = {
+    poolOptions: [[{ poolId: 555, dex: 'humbleswap' }], [{ poolId: 666, dex: 'humbleswap' }]],
+    intermediateTokens: [2], hops: 2, tokenSequence: [1, 2, 3]
+  };
+  const routeLate = makeMultiPoolRoute([111, 112], 222);
+  const result = await findOptimalMultiHopRoute([routeEarly, routeLate], 1, 3, '1000', 0.01, '', 1, cache);
+
+  assert.ok(result, 'routeLate still produced a valid quote');
+  // The ONLY concrete enumeration is routeEarly's reserved fallback (pool 555);
+  // routeLate never enumerates (its slot was reserved by the earlier route).
+  assert.deepEqual(genCombosFor, [555], 'the earlier route\'s reserved fallback runs; the later route does not consume the slot');
 });
