@@ -104,3 +104,19 @@ test('pathological rate-limit env values (fractional window, exponential max) fa
   assert.equal(res.status, 400);
   assert.equal(res.headers.get('ratelimit-limit'), '60', 'both pathological values fall back to the default cap of 60');
 });
+
+test('operationally absurd but integer-valid rate-limit values (1ms window, 2^53-1 max) fall back to defaults', async (t) => {
+  // A 1ms window resets faster than any realistic burst, and a max of
+  // Number.MAX_SAFE_INTEGER passes Number.isInteger yet effectively disables
+  // the cap. Both are out of the meaningful [1000, 2^31-1] / [1, 1e6] ranges
+  // and must fall back to the documented defaults.
+  const app = await withEnv({ RATE_LIMIT_WINDOW_MS: '1', RATE_LIMIT_MAX: String(Number.MAX_SAFE_INTEGER) }, () => importFreshIndex());
+  const server = app.listen(0);
+  await new Promise((resolve) => server.once('listening', resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const baseUrl = `http://localhost:${server.address().port}`;
+
+  const res = await fetch(`${baseUrl}/quote`, { method: 'POST' });
+  assert.equal(res.status, 400);
+  assert.equal(res.headers.get('ratelimit-limit'), '60', 'a 1ms window and a 2^53-1 max both fall back to the default cap of 60');
+});

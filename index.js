@@ -90,24 +90,29 @@ app.set('trust proxy', 1);
 // considered and deliberately deferred — it needs new infra/credentials,
 // which this task avoids (human decision, TASK-26). Documented limitation,
 // not a silent shim (CONVE-33).
-// Both knobs validate to a positive INTEGER within a sane range and fall back
-// to the documented default otherwise (never silently neutralize the limiter):
-//   - windowMs must be an integer in [1, 2^31-1]; a fractional value (0.5) or
-//     one above Node's max timer delay (2^31-1) would make the store recycle
-//     on ~millisecond intervals, effectively disabling the window.
-//   - limit must be a positive safe integer; a fractional or absurd value
-//     (e.g. "1e100", which Number.isInteger still accepts) would let the cap
-//     never bite.
-const MAX_TIMER_DELAY_MS = 2_147_483_647; // 2^31 - 1, Node's setTimeout ceiling
+// Both knobs validate to an INTEGER within an operationally MEANINGFUL range
+// and fall back to the documented default otherwise (never silently
+// neutralize the limiter, in either direction):
+//   - windowMs must be in [1000, 2^31-1]. Below ~1s the window resets faster
+//     than any realistic burst, making the limit useless; above Node's max
+//     timer delay (2^31-1) it overflows setTimeout and fires immediately.
+//   - limit must be in [1, 1_000_000]. A finite ceiling so an absurd but
+//     "valid safe integer" value (e.g. 9007199254740991) can't effectively
+//     disable the cap; the floor rejects 0/negative.
+const MIN_RATE_LIMIT_WINDOW_MS = 1000;           // 1s — smaller windows are meaningless
+const MAX_RATE_LIMIT_WINDOW_MS = 2_147_483_647;  // 2^31 - 1, Node's setTimeout ceiling
+const MAX_RATE_LIMIT_MAX = 1_000_000;            // generous but finite request ceiling
 const RATE_LIMIT_WINDOW_MS = (() => {
   const fromEnv = Number(process.env.RATE_LIMIT_WINDOW_MS);
-  return Number.isInteger(fromEnv) && fromEnv >= 1 && fromEnv <= MAX_TIMER_DELAY_MS
+  return Number.isInteger(fromEnv) && fromEnv >= MIN_RATE_LIMIT_WINDOW_MS && fromEnv <= MAX_RATE_LIMIT_WINDOW_MS
     ? fromEnv
     : 60 * 1000; // 1 minute
 })();
 const RATE_LIMIT_MAX = (() => {
   const fromEnv = Number(process.env.RATE_LIMIT_MAX);
-  return Number.isSafeInteger(fromEnv) && fromEnv >= 1 ? fromEnv : 60; // 60 req/window
+  return Number.isInteger(fromEnv) && fromEnv >= 1 && fromEnv <= MAX_RATE_LIMIT_MAX
+    ? fromEnv
+    : 60; // 60 req/window
 })();
 const apiRateLimiter = rateLimit({
   windowMs: RATE_LIMIT_WINDOW_MS,

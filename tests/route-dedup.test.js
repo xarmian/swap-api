@@ -332,3 +332,70 @@ test('per-request budget: the remaining budget shrinks as it is handed to each s
   // Route A: budget 10 -> returns 3 -> budget 7. Route B: budget 7 -> returns 3.
   assert.deepEqual(genCombosArgs, [10, 7], 'the shared budget decreases by the concrete count consumed by each prior route');
 });
+
+test('per-request budget: the failure-only single-pool fallback is skipped once the budget is exhausted (does not bypass the cap)', async (t) => {
+  let genCombosCalls = 0;
+  mockUtils(t);
+
+  // humbleswap: routeB's single pools (555/666) always throw, forcing routeB's
+  // split (poolOptions) candidate to fail and reach the concrete FALLBACK path;
+  // routeA's pools (111/112/222) succeed.
+  t.mock.module('../lib/humbleswap.js', {
+    namedExports: {
+      getPoolInfo: async (poolId) => {
+        if (Number(poolId) === 555 || Number(poolId) === 666) throw new Error('transient failure (routeB)');
+        return { tokA: 100, tokB: 200, poolBals: { A: 1_000_000n, B: 1_000_000n }, protoInfo: { totFee: 30 } };
+      },
+      calculateOutputAmount: (amountIn) => { const a = BigInt(amountIn); return a > 0n ? a / 2n : 0n; },
+      resolveWrappedTokens: () => ({ inputWrapped: 100, outputWrapped: 200 }),
+      validateWrappedPair: () => true
+    }
+  });
+  t.mock.module('../lib/nomadex.js', {
+    namedExports: {
+      NOMADEX_FEE_SCALE: 10000n,
+      getPoolInfo: async () => { throw new Error('nomadex not used'); },
+      calculateOutputAmount: () => 0n
+    }
+  });
+  t.mock.module('../lib/config.js', {
+    namedExports: {
+      getPoolConfigById: () => null,
+      generateRouteCombinations: (route, maxArg) => {
+        genCombosCalls += 1;
+        return Array.from({ length: Math.min(maxArg, 10) }, (_, i) => ({
+          pools: [route.poolOptions[0][i % route.poolOptions[0].length], route.poolOptions[1][0]],
+          intermediateTokens: route.intermediateTokens,
+          hops: route.hops
+        }));
+      },
+      findMatchingPools: () => [],
+      findRoutes: () => [],
+      getDiscoveryStatus: () => null,
+      getUnderlyingForWrapped: () => null,
+      MAX_ROUTE_COMBINATIONS: 10
+    }
+  });
+
+  const { findOptimalMultiHopRoute, createPoolInfoCache } = await importFreshQuotes();
+  const cache = createPoolInfoCache();
+
+  // routeA is multi-pool-per-hop: its up-front concrete enumeration returns 10
+  // combinations and exhausts the whole budget. routeB is single-pool-per-hop
+  // (deferred), and its split pass fails transiently, so WITHOUT the budget
+  // guard the fallback would call generateRouteCombinations a SECOND time and
+  // add concrete retries beyond the cap.
+  const routeA = makeMultiPoolRoute([111, 112], 222);
+  const routeB = {
+    poolOptions: [[{ poolId: 555, dex: 'humbleswap' }], [{ poolId: 666, dex: 'humbleswap' }]],
+    intermediateTokens: [2],
+    hops: 2,
+    tokenSequence: [1, 2, 3]
+  };
+  const result = await findOptimalMultiHopRoute([routeA, routeB], 1, 3, '1000', 0.01, '', 10, cache);
+
+  assert.ok(result, 'routeA still produced a valid quote');
+  // generateRouteCombinations runs exactly ONCE (routeA). The budget-exhausted
+  // routeB fallback is skipped rather than adding uncapped concrete retries.
+  assert.equal(genCombosCalls, 1, 'the fallback respects the exhausted shared budget and does not re-enumerate');
+});
