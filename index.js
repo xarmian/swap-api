@@ -1,5 +1,6 @@
 import express from 'express';
 import cors from 'cors';
+import algosdk from 'algosdk';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { handleQuote, handleUnwrap, withDiscoveryWarning } from './lib/handlers.js';
@@ -135,6 +136,14 @@ app.post('/quote', async (req, res) => {
       }, getDiscoveryStatus()));
     }
 
+    // address is optional (see comment above) — only validate it when the
+    // caller actually provided one, so an omitted address never 400s here.
+    if (address !== undefined && address !== null && address !== '' && !algosdk.isValidAddress(address)) {
+      return res.status(400).json(withDiscoveryWarning({
+        error: 'Invalid address: must be a valid Algorand/Voi address'
+      }, getDiscoveryStatus()));
+    }
+
     // Validate amount is a well-formed positive integer STRING in base units,
     // matching the documented API contract (README: `amount` is a string),
     // before it reaches BigInt() deep in the quote engine. A malformed value
@@ -203,6 +212,10 @@ app.post('/quote', async (req, res) => {
   }
 });
 
+// Each unwrap item costs ~2 txns (unwrap + transfer), and an atomic group is
+// capped at 16 txns, so 8 items is the most that can ever fit in one group.
+const MAX_UNWRAP_ITEMS = 8;
+
 // POST /unwrap endpoint
 app.post('/unwrap', async (req, res) => {
   try {
@@ -223,6 +236,14 @@ app.post('/unwrap', async (req, res) => {
     const { items } = req.body || {};
     if (!Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ error: 'items array is required and must be non-empty' });
+    }
+    // Cap items before any per-item validation/chain calls — an unbounded
+    // array would otherwise fan out N chain calls before an inevitable
+    // group-size failure (see MAX_UNWRAP_ITEMS above).
+    if (items.length > MAX_UNWRAP_ITEMS) {
+      return res.status(400).json({
+        error: `Too many items: at most ${MAX_UNWRAP_ITEMS} per unwrap request`
+      });
     }
     const badItemIndex = items.findIndex(
       (item) => !item || !isValidAssetId(item.wrappedTokenId)
