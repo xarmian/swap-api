@@ -68,6 +68,23 @@ test('CORS_ORIGINS set: an allowed origin is reflected back exactly', async (t) 
   assert.equal(res.headers.get('access-control-allow-origin'), allowed);
 });
 
+test('CORS_ORIGINS="*" behaves as wide-open, not as a single literal origin', async (t) => {
+  // A literal '*' entry must map back to origin: '*' (allow-all), NOT be
+  // treated as one exact origin string that no real Origin header equals —
+  // otherwise the natural "open it back up" value would silently block every
+  // browser origin.
+  const app = await withCorsOrigins('*', () => importFreshIndex());
+  const server = app.listen(0);
+  await new Promise((resolve) => server.once('listening', resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const baseUrl = `http://localhost:${server.address().port}`;
+
+  const res = await fetch(`${baseUrl}/health`, {
+    headers: { Origin: 'https://anything.example' }
+  });
+  assert.equal(res.headers.get('access-control-allow-origin'), '*');
+});
+
 test('CORS_ORIGINS set: an origin NOT in the allowlist gets no Access-Control-Allow-Origin header', async (t) => {
   const app = await withCorsOrigins('https://app.snowballswap.example', () => importFreshIndex());
   const server = app.listen(0);

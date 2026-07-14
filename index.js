@@ -42,13 +42,20 @@ const PORT = process.env.PORT || 3000;
 // or API keys, so a wide-open CORS default is an intentional public-API
 // choice, not an oversight — preserves the pre-existing `cors()` (allow-all)
 // behavior. CORS_ORIGINS (comma-separated) lets that be locked down to a
-// specific origin list purely via env, without a code change/deploy.
+// specific origin list purely via env, without a code change/deploy. No
+// `credentials: true` is set, so an allowed origin is only ever REFLECTED for
+// simple/anonymous CORS — a wildcard can never be paired with credentials.
 const CORS_ORIGINS = (process.env.CORS_ORIGINS || '')
   .split(',')
   .map((origin) => origin.trim())
   .filter(Boolean);
 
-const corsOptions = CORS_ORIGINS.length === 0
+// Unset/empty OR an explicit '*' entry both mean wide-open. Treating a literal
+// '*' in the list as allow-all (rather than as one exact origin string that
+// no real Origin header would ever equal) makes the natural
+// CORS_ORIGINS=* config preserve the default-open behavior instead of
+// silently blocking every browser origin.
+const corsOptions = (CORS_ORIGINS.length === 0 || CORS_ORIGINS.includes('*'))
   ? { origin: '*' }
   : {
       // Reflects the request Origin only when it's in the configured
@@ -83,13 +90,24 @@ app.set('trust proxy', 1);
 // considered and deliberately deferred — it needs new infra/credentials,
 // which this task avoids (human decision, TASK-26). Documented limitation,
 // not a silent shim (CONVE-33).
+// Both knobs validate to a positive INTEGER within a sane range and fall back
+// to the documented default otherwise (never silently neutralize the limiter):
+//   - windowMs must be an integer in [1, 2^31-1]; a fractional value (0.5) or
+//     one above Node's max timer delay (2^31-1) would make the store recycle
+//     on ~millisecond intervals, effectively disabling the window.
+//   - limit must be a positive safe integer; a fractional or absurd value
+//     (e.g. "1e100", which Number.isInteger still accepts) would let the cap
+//     never bite.
+const MAX_TIMER_DELAY_MS = 2_147_483_647; // 2^31 - 1, Node's setTimeout ceiling
 const RATE_LIMIT_WINDOW_MS = (() => {
   const fromEnv = Number(process.env.RATE_LIMIT_WINDOW_MS);
-  return Number.isFinite(fromEnv) && fromEnv > 0 ? fromEnv : 60 * 1000; // 1 minute
+  return Number.isInteger(fromEnv) && fromEnv >= 1 && fromEnv <= MAX_TIMER_DELAY_MS
+    ? fromEnv
+    : 60 * 1000; // 1 minute
 })();
 const RATE_LIMIT_MAX = (() => {
   const fromEnv = Number(process.env.RATE_LIMIT_MAX);
-  return Number.isInteger(fromEnv) && fromEnv > 0 ? fromEnv : 60; // 60 req/window
+  return Number.isSafeInteger(fromEnv) && fromEnv >= 1 ? fromEnv : 60; // 60 req/window
 })();
 const apiRateLimiter = rateLimit({
   windowMs: RATE_LIMIT_WINDOW_MS,

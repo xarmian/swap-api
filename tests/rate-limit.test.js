@@ -89,3 +89,18 @@ test('an invalid RATE_LIMIT_MAX/RATE_LIMIT_WINDOW_MS falls back to the documente
   assert.equal(res.status, 400);
   assert.equal(res.headers.get('ratelimit-limit'), '60', 'garbage RATE_LIMIT_MAX falls back to the default of 60, not 0/unbounded');
 });
+
+test('pathological rate-limit env values (fractional window, exponential max) fall back to defaults, never neutralizing the limiter', async (t) => {
+  // RATE_LIMIT_WINDOW_MS=0.5 (fractional) and RATE_LIMIT_MAX=1e100 (an
+  // "integer"-valued float Number.isInteger accepts) must NOT be honored —
+  // a sub-ms window recycles the store instantly and a 1e100 cap never bites.
+  const app = await withEnv({ RATE_LIMIT_WINDOW_MS: '0.5', RATE_LIMIT_MAX: '1e100' }, () => importFreshIndex());
+  const server = app.listen(0);
+  await new Promise((resolve) => server.once('listening', resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const baseUrl = `http://localhost:${server.address().port}`;
+
+  const res = await fetch(`${baseUrl}/quote`, { method: 'POST' });
+  assert.equal(res.status, 400);
+  assert.equal(res.headers.get('ratelimit-limit'), '60', 'both pathological values fall back to the default cap of 60');
+});

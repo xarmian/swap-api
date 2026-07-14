@@ -55,24 +55,37 @@ test('MAX_ROUTE_COMBINATIONS falls back to 10 on garbage/non-positive/non-intege
   }
 });
 
-test('generateRouteCombinations defaults its own maxCombinations param to MAX_ROUTE_COMBINATIONS (10), not the old 100', async () => {
+test('MAX_ROUTE_COMBINATIONS falls back to 10 for absurdly large / exponential values (a pathological positive value must not defeat the cap)', async () => {
+  // Number.isInteger(Number("1e100")) is true, so a naive "positive integer"
+  // check would accept it and restore effectively-unbounded enumeration.
+  for (const bad of ['1e100', '1000000000', '99999999999999999999']) {
+    const { MAX_ROUTE_COMBINATIONS } = await withEnv(bad, () => importFreshConfig());
+    assert.equal(MAX_ROUTE_COMBINATIONS, 10, `expected fallback of 10 for out-of-range MAX_ROUTE_COMBINATIONS=${JSON.stringify(bad)}`);
+  }
+  // The documented ceiling (1000) is still accepted — legitimately raisable.
+  const { MAX_ROUTE_COMBINATIONS: atCeiling } = await withEnv('1000', () => importFreshConfig());
+  assert.equal(atCeiling, 1000);
+});
+
+test('generateRouteCombinations hard-truncates to maxCombinations: default (10) never overshoots via the ceil-per-hop rounding', async () => {
   const { generateRouteCombinations, MAX_ROUTE_COMBINATIONS } = await withEnv(undefined, () => importFreshConfig());
   assert.equal(MAX_ROUTE_COMBINATIONS, 10);
 
   // 2 hops x 20 pool options each = 400 raw combinations, well above either
-  // cap, so generateRouteCombinations' own per-hop-limiting kicks in for
-  // both calls below — this isolates the DEFAULT param value (10 vs the old
-  // 100), not whether limiting happens at all.
+  // cap, so generateRouteCombinations' per-hop-limiting kicks in for both
+  // calls below — this isolates the DEFAULT param value AND the truncation.
   const poolOptions = [0, 1].map((hop) =>
     Array.from({ length: 20 }, (_, i) => ({ poolId: hop * 100 + i, dex: 'humbleswap' }))
   );
   const route = { poolOptions, intermediateTokens: [101], hops: 2 };
 
-  // maxPoolsPerHop = ceil(sqrt(10)) = 4 -> 4*4 = 16 combinations generated.
+  // Without truncation the ceil(sqrt(10))=4 per-hop limit yields 4*4 = 16 > 10;
+  // the hard slice pins the effective count at EXACTLY the cap.
   const combosDefault = generateRouteCombinations(route);
-  assert.equal(combosDefault.length, 16, 'default (env-derived MAX_ROUTE_COMBINATIONS=10) limits to 4 pools/hop = 16 combinations');
+  assert.equal(combosDefault.length, 10, 'default (env-derived MAX_ROUTE_COMBINATIONS=10) truncates to exactly 10 combinations, never 16');
 
-  // maxPoolsPerHop = ceil(sqrt(100)) = 10 -> 10*10 = 100 combinations generated.
+  // An explicit maxCombinations=100 -> ceil(sqrt(100))=10 -> 10*10 = 100, at the
+  // cap, so nothing is truncated (proves the DEFAULT, not the function, changed).
   const combosExplicit100 = generateRouteCombinations(route, 100);
-  assert.equal(combosExplicit100.length, 100, 'an explicit maxCombinations=100 still behaves as before (proves the DEFAULT, not the function itself, was lowered)');
+  assert.equal(combosExplicit100.length, 100, 'an explicit maxCombinations=100 still yields 100 (no spurious over-truncation)');
 });
