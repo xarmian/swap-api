@@ -3,6 +3,7 @@ import cors from 'cors';
 import algosdk from 'algosdk';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { randomUUID } from 'crypto';
 import { handleQuote, handleUnwrap, withDiscoveryWarning } from './lib/handlers.js';
 import { getPoolConfigById, loadConfigsOnce, poolsConfig, initializeConfig, getDiscoveryStatus } from './lib/config.js';
 import { getAllTokens } from './lib/discovery.js';
@@ -93,6 +94,20 @@ function isValidAssetId(value) {
   // would first round a huge numeric string, which is exactly the precision
   // loss this check exists to catch.
   return BigInt(value) <= BigInt(Number.MAX_SAFE_INTEGER);
+}
+
+// Build and send a client-safe internal-error response: NEVER echoes
+// error.message/stack to the caller (it can contain node internals,
+// third-party SDK payloads, or upstream response bodies - an information
+// disclosure risk on a money-handling API). Instead logs the full error
+// server-side tagged with a short random ID and returns only that ID to the
+// client, so a bug report can be correlated back to the matching server log
+// line without ever exposing internals over the wire (TASK-27).
+function internalError(res, error, context, { label = 'Internal server error', discoveryStatus, status = 500 } = {}) {
+  const errorId = randomUUID();
+  console.error(`[${errorId}] ${context}:`, error);
+  const body = { error: label, errorId };
+  return res.status(status).json(discoveryStatus ? withDiscoveryWarning(body, discoveryStatus) : body);
 }
 
 // POST /quote endpoint
@@ -206,17 +221,15 @@ app.post('/quote', async (req, res) => {
       dex
     });
   } catch (error) {
-    console.error('Error generating quote:', error);
     // Surfaces discovery status on this outer catch too (not just inside
     // handleQuote), using the same discoveryWarning shape as every other
     // /quote exit for a consistent response contract - the most likely cause
     // landing here is ensureConfigInitialized() itself throwing (e.g. a
     // below-threshold discovery failure), which is exactly a
     // discovery-status-relevant error, not a generic bug (TASK-19, CONVE-35).
-    res.status(500).json(withDiscoveryWarning({
-      error: 'Internal server error',
-      message: error.message
-    }, getDiscoveryStatus()));
+    return internalError(res, error, 'Error generating quote', {
+      discoveryStatus: getDiscoveryStatus()
+    });
   }
 });
 
@@ -264,11 +277,7 @@ app.post('/unwrap', async (req, res) => {
     await ensureConfigInitialized();
     return await handleUnwrap(req, res);
   } catch (error) {
-    console.error('Error handling unwrap request:', error);
-    res.status(500).json({
-      error: 'Internal server error',
-      message: error.message
-    });
+    return internalError(res, error, 'Error handling unwrap request');
   }
 });
 
@@ -313,10 +322,8 @@ app.get('/pool/:poolId', async (req, res) => {
           }
         });
       } catch (error) {
-        console.error('Error fetching Nomadex pool info:', error);
-        return res.status(500).json({
-          error: 'Failed to fetch pool information',
-          details: error.message
+        return internalError(res, error, 'Error fetching Nomadex pool info', {
+          label: 'Failed to fetch pool information'
         });
       }
     } else {
@@ -345,20 +352,14 @@ app.get('/pool/:poolId', async (req, res) => {
           locked: poolInfo.protoInfo.locked
         });
       } catch (error) {
-        console.error('Error fetching HumbleSwap pool info:', error);
-        return res.status(500).json({
-          error: 'Failed to fetch pool information',
-          details: error.message
+        return internalError(res, error, 'Error fetching HumbleSwap pool info', {
+          label: 'Failed to fetch pool information'
         });
       }
     }
 
   } catch (error) {
-    console.error('Error fetching pool info:', error);
-    res.status(500).json({
-      error: 'Internal server error',
-      message: error.message
-    });
+    return internalError(res, error, 'Error fetching pool info');
   }
 });
 
@@ -371,7 +372,7 @@ app.get('/config/pools', async (req, res) => {
     // a partial pool set is visible instead of silently serving worse quotes.
     res.json({ ...poolsConfig, discovery: getDiscoveryStatus() });
   } catch (e) {
-    res.status(500).json({ error: 'Failed to load pools config', message: e.message });
+    internalError(res, e, 'Failed to load pools config', { label: 'Failed to load pools config' });
   }
 });
 
@@ -382,7 +383,7 @@ app.get('/config/tokens', async (req, res) => {
     const tokens = getAllTokens();
     res.json({ tokens: tokens });
   } catch (e) {
-    res.status(500).json({ error: 'Failed to load tokens config', message: e.message });
+    internalError(res, e, 'Failed to load tokens config', { label: 'Failed to load tokens config' });
   }
 });
 
@@ -414,11 +415,15 @@ app.use((err, req, res, next) => {
   if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
     return res.status(400).json({ error: 'Malformed JSON request body' });
   }
-  console.error('Unhandled error:', err);
-  res.status(err.status || err.statusCode || 500).json({
-    error: 'Internal server error',
-    message: err.message
-  });
+  const status = err.status || err.statusCode || 500;
+  if (status < 500) {
+    // A framework/middleware-level 4xx (e.g. payload-too-large,
+    // unsupported-media-type) - err.message here is a controlled, safe
+    // description, not an internal/exception leak, so it is left intact.
+    // Only internal/500s are genericized (TASK-27).
+    return res.status(status).json({ error: err.message || 'Request error' });
+  }
+  internalError(res, err, 'Unhandled error', { status });
 });
 
 // Start server only when running directly (local development)
@@ -438,8 +443,8 @@ if (!process.env.VERCEL) {
   });
 }
 
-// Named export for unit testing (TASK-45); default export below is unchanged.
-export { isValidAssetId };
+// Named exports for unit testing (TASK-45, TASK-27); default export below is unchanged.
+export { isValidAssetId, internalError };
 
 // Export app for Vercel serverless function
 export default app;
