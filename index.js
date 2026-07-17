@@ -4,7 +4,7 @@ import { rateLimit } from 'express-rate-limit';
 import algosdk from 'algosdk';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { randomUUID } from 'crypto';
+import { randomUUID, createHash, timingSafeEqual } from 'crypto';
 import { handleQuote, handleUnwrap, withDiscoveryWarning } from './lib/handlers.js';
 import { getPoolConfigById, loadConfigsOnce, poolsConfig, initializeConfig, getDiscoveryStatus } from './lib/config.js';
 import { getAllTokens } from './lib/discovery.js';
@@ -68,6 +68,47 @@ const corsOptions = (CORS_ORIGINS.length === 0 || CORS_ORIGINS.includes('*'))
         return callback(null, false);
       }
     };
+
+// --- Operator-only discovery-error gating (TASK-60) ---
+//
+// /health and /config/pools expose getDiscoveryStatus(), whose per-pool `error`
+// is the RAW discovery-failure message from algod/indexer/ulujs (lib/discovery.js)
+// and can leak node-provider URLs / HTTP internals. Both endpoints are public
+// on Vercel. The rest of the status (which pools failed, attempt counts, degraded
+// state) is intentional operator/monitoring visibility (TASK-19) and stays
+// public — ONLY the raw error string is gated here. A caller proves it's an
+// operator by presenting OPERATOR_TOKEN in the `x-operator-token` header, or the
+// whole deployment opts in with DISCOVERY_DEBUG=true (a debug instance). With
+// neither env set the raw error is simply never exposed — fail closed, no silent
+// default (CONVE-33). This is deliberately decoupled from the generic DEBUG
+// (verbose-logging) flag so flipping logs on can't unknowingly disclose internals.
+const OPERATOR_TOKEN = process.env.OPERATOR_TOKEN || '';
+const DISCOVERY_DEBUG = process.env.DISCOVERY_DEBUG === 'true';
+
+// Exported for unit testing (see export block below); env-derived defaults are
+// injectable so a test can exercise the gate without importing/booting the app.
+function isOperatorRequest(req, { operatorToken = OPERATOR_TOKEN, discoveryDebug = DISCOVERY_DEBUG } = {}) {
+  if (discoveryDebug) return true;
+  if (!operatorToken) return false;
+  // Compare fixed-length SHA-256 digests in constant time: hashing makes both
+  // operands 32 bytes regardless of input, so timingSafeEqual never sees a
+  // length mismatch and neither the token's LENGTH nor its content can be
+  // recovered via response-timing samples. Collision-resistance means equal
+  // digests iff equal tokens.
+  const provided = createHash('sha256').update(String(req.get('x-operator-token') || '')).digest();
+  const expected = createHash('sha256').update(String(operatorToken)).digest();
+  return timingSafeEqual(provided, expected);
+}
+
+// Endpoints whose body varies by operator identity (they include the raw
+// discovery error only for operators) must never be cached by URL and replayed
+// to a DIFFERENT caller — a shared proxy could otherwise serve an operator's
+// raw-error response to an anonymous one. Mark them uncacheable AND key any
+// cache that ignores no-store on the operator header (TASK-60).
+function setOperatorVaryHeaders(res) {
+  res.set('Cache-Control', 'no-store');
+  res.set('Vary', 'x-operator-token');
+}
 
 // Vercel puts the real client IP in X-Forwarded-For, added by exactly one
 // hop (Vercel's own edge) in front of the serverless function. Trusting only
@@ -463,7 +504,8 @@ app.get('/config/pools', async (req, res) => {
     loadConfigsOnce();
     // `discovery` surfaces any pools that failed and are pending TTL retry, so
     // a partial pool set is visible instead of silently serving worse quotes.
-    res.json({ ...poolsConfig, discovery: getDiscoveryStatus() });
+    setOperatorVaryHeaders(res);
+    res.json({ ...poolsConfig, discovery: getDiscoveryStatus(isOperatorRequest(req)) });
   } catch (e) {
     internalError(res, e, 'Failed to load pools config', { label: 'Failed to load pools config' });
   }
@@ -485,7 +527,8 @@ app.get('/config/tokens', async (req, res) => {
 // partial pool set is visible to operators/monitoring rather than looking
 // identical to a fully-healthy instance (TASK-19).
 app.get('/health', (req, res) => {
-  const discovery = getDiscoveryStatus();
+  setOperatorVaryHeaders(res);
+  const discovery = getDiscoveryStatus(isOperatorRequest(req));
   const status = !discovery.initialized
     ? 'initializing'
     : discovery.failedPools.length > 0
@@ -536,8 +579,8 @@ if (!process.env.VERCEL) {
   });
 }
 
-// Named exports for unit testing (TASK-45, TASK-27); default export below is unchanged.
-export { isValidAssetId, internalError };
+// Named exports for unit testing (TASK-45, TASK-27, TASK-60); default export below is unchanged.
+export { isValidAssetId, internalError, isOperatorRequest };
 
 // Export app for Vercel serverless function
 export default app;
