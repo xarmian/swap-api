@@ -114,6 +114,9 @@ test('the unwrap builder normalizes and asserts before its group reassignment an
   assert.notEqual(lastRegroup, -1);
   assert.ok(finalize < lastRegroup, 'must run before the last group ID reassignment ahead of the final verification');
   assert.ok(finalize < verification, 'must run before the final strict verification');
+  const lastRebuild = unwrap.lastIndexOf('txns[i] = rebuiltTxn');
+  assert.notEqual(lastRebuild, -1, 'the rebuild loop must still replace txns[i]');
+  assert.ok(finalize > lastRebuild, 'must run after the rebuild loop, which re-adds box apps (including the called app)');
 });
 
 test('the swap builder normalizes before strict verification and normalizes and asserts before the final encode', () => {
